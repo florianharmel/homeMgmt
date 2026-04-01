@@ -24,6 +24,23 @@ npm run dev
 - Frontend : `http://localhost:5173`
 - API backend : `http://localhost:8787`
 
+## Déploiement Vercel (Frontend) + API séparée
+
+Le backend MELCloud ne doit pas être hébergé comme simple frontend statique.
+
+1. Déployer l'API (`server/index.js`) sur un service Node (Render, Railway, Fly.io, VPS).
+2. Sur Vercel, définir la variable d'environnement :
+   - `VITE_API_BASE_URL=https://ton-backend.example.com`
+3. Redéployer le frontend.
+
+## Déploiement 100% Vercel
+
+- Frontend et API serverless sont dans ce repo (`api/[...slug].js`).
+- Définir dans Vercel :
+  - `MELCLOUD_REFRESH_TOKEN=<ton refresh token>`
+  - optionnel: `VITE_API_BASE_URL=/api` (par défaut déjà utilisé)
+- En contexte Vercel, le champ refresh token est masqué dans l'UI.
+
 ## Notes techniques
 
 - Le backend implémente un flux OAuth MELCloud Home inspiré du plugin `homebridge-melcloud-home`.

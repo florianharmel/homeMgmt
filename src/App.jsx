@@ -20,9 +20,13 @@ const weatherTabs = [
   { id: "weekend", label: "Week-end à venir" },
   { id: "15d", label: "15 prochains jours" },
 ];
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
+const IS_VERCEL_CONTEXT =
+  typeof window !== "undefined" &&
+  (window.location.hostname.endsWith(".vercel.app") || window.location.hostname === "home-mgmt.vercel.app");
 
 async function api(path, options = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const res = await fetch(`${API_BASE_URL}${path}`, { headers: { "Content-Type": "application/json" }, ...options });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Erreur API");
   return data;
@@ -30,6 +34,7 @@ async function api(path, options = {}) {
 
 export default function App() {
   const [credentials, setCredentials] = useState({ email: "", password: "" });
+  const [refreshTokenInput, setRefreshTokenInput] = useState("");
   const [session, setSession] = useState(null);
   const [device, setDevice] = useState(null);
   const [history, setHistory] = useState([]);
@@ -80,7 +85,14 @@ export default function App() {
   const handleLogin = async () => {
     setBusy(true);
     try {
-      await api("/api/auth/login", { method: "POST", body: JSON.stringify(credentials) });
+      await api("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify(
+          !IS_VERCEL_CONTEXT && refreshTokenInput.trim()
+            ? { email: credentials.email, refreshToken: refreshTokenInput.trim() }
+            : credentials,
+        ),
+      });
       await refreshData();
       setError("");
     } catch (e) {
@@ -231,6 +243,13 @@ export default function App() {
           {error && <Alert severity="error">{error}</Alert>}
           <TextField label="Email MELCloud" value={credentials.email} onChange={(e) => setCredentials((s) => ({ ...s, email: e.target.value }))} />
           <TextField label="Mot de passe MELCloud" type="password" value={credentials.password} onChange={(e) => setCredentials((s) => ({ ...s, password: e.target.value }))} />
+          {!IS_VERCEL_CONTEXT && (
+            <TextField
+              label="Refresh Token MELCloud (optionnel)"
+              value={refreshTokenInput}
+              onChange={(e) => setRefreshTokenInput(e.target.value)}
+            />
+          )}
           <Button variant="contained" onClick={handleLogin}>Se connecter</Button>
         </Stack></CardContent></Card>
       </Container>
