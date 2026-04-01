@@ -7,6 +7,7 @@
     "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
     "dev:web": "vite",
     "dev:api": "node server/index.js",
+    "start": "node server/index.js",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -15,11 +16,9 @@
     "@emotion/styled": "^11.14.1",
     "@mui/icons-material": "^7.3.2",
     "@mui/material": "^7.3.2",
-    "@vercel/kv": "^3.0.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "recharts": "^3.2.1",
-    "serverless-http": "^4.0.0"
+    "recharts": "^3.2.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.4",

@@ -20,23 +20,18 @@ const weatherTabs = [
   { id: "weekend", label: "Week-end à venir" },
   { id: "15d", label: "15 prochains jours" },
 ];
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
-const IS_VERCEL_CONTEXT =
-  typeof window !== "undefined" &&
-  (window.location.hostname.endsWith(".vercel.app") || window.location.hostname === "home-mgmt.vercel.app");
 
-function buildApiUrl(path) {
-  const base = (API_BASE_URL || "").replace(/\/+$/, "");
-  const cleanPath = String(path || "").startsWith("/") ? String(path) : `/${String(path)}`;
-  if (base.endsWith("/api") && cleanPath.startsWith("/api/")) {
-    return `${base}${cleanPath.slice(4)}`;
-  }
-  if (!base) return cleanPath;
-  return `${base}${cleanPath}`;
+/** En production (Vercel), URL du backend Node (Render, Railway…). En dev, vide = proxy Vite vers /api. */
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+
+function apiUrl(path) {
+  const p = path.startsWith("/") ? path : `/${path}`;
+  if (!API_BASE) return p;
+  return `${API_BASE}${p}`;
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(buildApiUrl(path), { headers: { "Content-Type": "application/json" }, ...options });
+  const res = await fetch(apiUrl(path), { headers: { "Content-Type": "application/json" }, ...options });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Erreur API");
   return data;
@@ -44,7 +39,6 @@ async function api(path, options = {}) {
 
 export default function App() {
   const [credentials, setCredentials] = useState({ email: "", password: "" });
-  const [refreshTokenInput, setRefreshTokenInput] = useState("");
   const [session, setSession] = useState(null);
   const [device, setDevice] = useState(null);
   const [history, setHistory] = useState([]);
@@ -73,11 +67,23 @@ export default function App() {
       api(`/api/weather/history?period=${period}`),
     ]);
     if (s.status === "fulfilled") setSession(s.value);
-    if (d.status === "fulfilled") setDevice(d.value);
+    if (d.status === "fulfilled") {
+      setDevice(d.value);
+    } else if (d.status === "rejected") {
+      const msg = String(d.reason?.message || "");
+      if (msg.includes("Session MELCloud") || msg.includes("expirée") || msg.includes("Refresh token")) {
+        setSession({ authenticated: false, email: null });
+        setDevice(null);
+        setError(msg);
+      }
+    }
     if (h.status === "fulfilled") setHistory(h.value.points || []);
     if (p.status === "fulfilled") setPacTrend(p.value.points || []);
     if (w.status === "fulfilled") setWifiHistory(w.value.points || []);
     if (wh.status === "fulfilled") setWeatherHistory(wh.value.points || []);
+    if (s.status === "fulfilled" && s.value && !s.value.authenticated) {
+      setDevice(null);
+    }
   };
 
   useEffect(() => {
@@ -95,14 +101,7 @@ export default function App() {
   const handleLogin = async () => {
     setBusy(true);
     try {
-      await api("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify(
-          !IS_VERCEL_CONTEXT && refreshTokenInput.trim()
-            ? { email: credentials.email, refreshToken: refreshTokenInput.trim() }
-            : credentials,
-        ),
-      });
+      await api("/api/auth/login", { method: "POST", body: JSON.stringify(credentials) });
       await refreshData();
       setError("");
     } catch (e) {
@@ -253,13 +252,6 @@ export default function App() {
           {error && <Alert severity="error">{error}</Alert>}
           <TextField label="Email MELCloud" value={credentials.email} onChange={(e) => setCredentials((s) => ({ ...s, email: e.target.value }))} />
           <TextField label="Mot de passe MELCloud" type="password" value={credentials.password} onChange={(e) => setCredentials((s) => ({ ...s, password: e.target.value }))} />
-          {!IS_VERCEL_CONTEXT && (
-            <TextField
-              label="Refresh Token MELCloud (optionnel)"
-              value={refreshTokenInput}
-              onChange={(e) => setRefreshTokenInput(e.target.value)}
-            />
-          )}
           <Button variant="contained" onClick={handleLogin}>Se connecter</Button>
         </Stack></CardContent></Card>
       </Container>

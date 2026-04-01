@@ -7,7 +7,30 @@ import express from "express";
 import cors from "cors";
 
 const app = express();
-app.use(cors());
+
+/** Origines autorisées (navigateur), séparées par des virgules. Ex. https://mon-app.vercel.app,http://localhost:5173 — vide = tout refléter (pratique en dev local). */
+function buildCorsOptions() {
+  const raw = process.env.CORS_ORIGIN;
+  if (!raw || !String(raw).trim()) {
+    return { origin: true };
+  }
+  if (String(raw).trim() === "*") {
+    return { origin: true };
+  }
+  const list = String(raw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return {
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (list.includes(origin)) return callback(null, true);
+      callback(null, false);
+    },
+  };
+}
+
+app.use(cors(buildCorsOptions()));
 app.use(express.json());
 
 const state = {
@@ -98,6 +121,17 @@ function saveAuthState() {
   } catch (_e) {
     // Ignore persistence errors.
   }
+}
+
+/** Jeton MELCloud invalide ou expiré : on vide la session pour forcer une nouvelle connexion. */
+function invalidatePersistedAuth() {
+  state.email = "";
+  state.refreshToken = "";
+  state.accessToken = "";
+  state.expiresAt = 0;
+  state.device = null;
+  state.rawDevice = null;
+  saveAuthState();
 }
 
 function pushHistory(point) {
@@ -241,19 +275,33 @@ async function getTokenFromRefreshToken() {
     form,
   );
   if (response.status !== 200) {
-    throw new Error(`Refresh token refusé (${response.status})`);
+    invalidatePersistedAuth();
+    throw new Error("Session MELCloud expirée — reconnectez-vous avec email et mot de passe.");
   }
-  const parsed = JSON.parse(response.body);
+  let parsed;
+  try {
+    parsed = JSON.parse(response.body);
+  } catch {
+    invalidatePersistedAuth();
+    throw new Error("Réponse MELCloud invalide — reconnectez-vous.");
+  }
   state.accessToken = parsed.access_token;
   state.refreshToken = parsed.refresh_token;
   state.expiresAt = Date.now() + parsed.expires_in * 1000;
   saveAuthState();
 }
 
+/** Une seule requête refresh OAuth à la fois (évite deux appels parallèles qui invalident le 2e jeton). */
+let tokenRefreshInFlight = null;
+
 async function ensureAccessToken() {
-  if (!state.accessToken || Date.now() > state.expiresAt - 60_000) {
-    await getTokenFromRefreshToken();
+  if (state.accessToken && Date.now() <= state.expiresAt - 60_000) return;
+  if (!tokenRefreshInFlight) {
+    tokenRefreshInFlight = getTokenFromRefreshToken().finally(() => {
+      tokenRefreshInFlight = null;
+    });
   }
+  await tokenRefreshInFlight;
 }
 
 async function melcloudApi(path, method = "GET", payload) {
@@ -950,7 +998,12 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-app.get("/api/session", (req, res) => {
+app.get("/api/session", async (req, res) => {
+  try {
+    if (state.refreshToken) await ensureAccessToken();
+  } catch (_e) {
+    // invalidatePersistedAuth déjà appelé si le refresh est refusé
+  }
   res.json({ authenticated: !!state.refreshToken, email: state.email || null });
 });
 
@@ -1110,7 +1163,8 @@ if (savedAuth) {
   state.expiresAt = savedAuth.expiresAt;
 }
 
-app.listen(8787, () => {
+const PORT = Number(process.env.PORT) || 8787;
+app.listen(PORT, () => {
   // eslint-disable-next-line no-console
-  console.log("API MELCloud lancée sur http://localhost:8787");
+  console.log(`API MELCloud lancée sur le port ${PORT}`);
 });

@@ -24,22 +24,18 @@ npm run dev
 - Frontend : `http://localhost:5173`
 - API backend : `http://localhost:8787`
 
-## Déploiement Vercel (Frontend) + API séparée
+## Déploiement (frontend Vercel + API sur Render / Railway / etc.)
 
-Le backend MELCloud ne doit pas être hébergé comme simple frontend statique.
+1. **Backend Node** : déployer le dossier racine (ou uniquement `server/`) sur une plateforme qui lance un process long (`npm start` → `node server/index.js`). Définir :
+   - `PORT` (souvent fourni automatiquement par l’hébergeur).
+   - `CORS_ORIGIN` : l’URL exacte de ton site Vercel + éventuellement `http://localhost:5173` pour les tests, par exemple :
+     `https://clots-xxx.vercel.app,http://localhost:5173`
+2. **Frontend Vercel** : connecter le repo, framework **Vite**, build `npm run build`, sortie `dist`.
+3. **Variables Vercel (build)** : `VITE_API_BASE_URL` = URL publique du backend **sans** slash final, par ex. `https://melcloud-api-xxxx.up.railway.app`.  
+   Redéployer après chaque changement de cette variable (elle est injectée au build).
+4. Copier `.env.example` vers `.env.local` en local si tu veux tester le front contre une API distante.
 
-1. Déployer l'API (`server/index.js`) sur un service Node (Render, Railway, Fly.io, VPS).
-2. Sur Vercel, définir la variable d'environnement :
-   - `VITE_API_BASE_URL=https://ton-backend.example.com`
-3. Redéployer le frontend.
-
-## Déploiement 100% Vercel
-
-- Frontend et API serverless sont dans ce repo (`api/[...slug].js`).
-- Définir dans Vercel :
-  - `MELCLOUD_REFRESH_TOKEN=<ton refresh token>`
-  - optionnel: `VITE_API_BASE_URL=/api` (par défaut déjà utilisé)
-- En contexte Vercel, le champ refresh token est masqué dans l'UI.
+Les fichiers `server/auth-store.json` et `server/history-store.json` restent sur le disque du serveur **API** (pas sur Vercel).
 
 ## Notes techniques
 
