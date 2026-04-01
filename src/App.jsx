@@ -25,8 +25,18 @@ const IS_VERCEL_CONTEXT =
   typeof window !== "undefined" &&
   (window.location.hostname.endsWith(".vercel.app") || window.location.hostname === "home-mgmt.vercel.app");
 
+function buildApiUrl(path) {
+  const base = (API_BASE_URL || "").replace(/\/+$/, "");
+  const cleanPath = String(path || "").startsWith("/") ? String(path) : `/${String(path)}`;
+  if (base.endsWith("/api") && cleanPath.startsWith("/api/")) {
+    return `${base}${cleanPath.slice(4)}`;
+  }
+  if (!base) return cleanPath;
+  return `${base}${cleanPath}`;
+}
+
 async function api(path, options = {}) {
-  const res = await fetch(`${API_BASE_URL}${path}`, { headers: { "Content-Type": "application/json" }, ...options });
+  const res = await fetch(buildApiUrl(path), { headers: { "Content-Type": "application/json" }, ...options });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Erreur API");
   return data;
