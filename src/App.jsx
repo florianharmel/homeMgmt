@@ -5,8 +5,29 @@ import Dehaze from "@mui/icons-material/Dehaze";
 import Lightbulb from "@mui/icons-material/Lightbulb";
 import PowerSettingsNew from "@mui/icons-material/PowerSettingsNew";
 import WbSunny from "@mui/icons-material/WbSunny";
-import { Alert, Box, Button, Card, CardContent, Container, FormControl, Grid, InputLabel, LinearProgress, ListItemIcon, MenuItem, Select, Slider, Stack, Switch, Tab, Tabs, TextField, Typography } from "@mui/material";
-import { Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Container,
+  FormControl,
+  Grid,
+  InputLabel,
+  LinearProgress,
+  ListItemIcon,
+  MenuItem,
+  Select,
+  Slider,
+  Stack,
+  Switch,
+  Tab,
+  Tabs,
+  TextField,
+  Typography,
+} from "@mui/material";
+import { Bar, CartesianGrid, ComposedChart, Legend, Line, LineChart, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 const modeOptions = ["Heat", "Cool", "Automatic", "Dry", "Fan"];
 const fanOptions = ["Auto", "One", "Two", "Three", "Four", "Five"];
@@ -27,6 +48,9 @@ function makePrecipBarShape(minWidthPx) {
 }
 
 const precipBarShape = makePrecipBarShape(7);
+
+const TRACK_LINE_ANIM = { isAnimationActive: true, animationDuration: 420, animationEasing: "ease-out" };
+const TRACK_BAR_ANIM = { isAnimationActive: true, animationDuration: 380, animationEasing: "ease-out" };
 
 function normalizeOperationMode(value) {
   const raw = String(value || "").trim();
@@ -83,6 +107,17 @@ const LEGEND_WEATHER = new Set(["Pluie (La Charmette)", "Neige (La Charmette)", 
 const WEATHER_LEGEND_ORDER = ["Pluie (La Charmette)", "Neige (La Charmette)", "Extérieure La Charmette", "Extérieure Chamrousse"];
 const PAC_LEGEND_ORDER = ["Température réelle PAC", "Consigne PAC", "Extérieure (PAC)"];
 
+/** Libellés Recharts `name` → clé `chartSeriesVisible`. */
+const LEGEND_VALUE_TO_KEY = {
+  "Pluie (La Charmette)": "pluie",
+  "Neige (La Charmette)": "neige",
+  "Extérieure La Charmette": "sechilienne",
+  "Extérieure Chamrousse": "chamrousse",
+  "Température réelle PAC": "interieure",
+  "Consigne PAC": "consigne",
+  "Extérieure (PAC)": "pacExterieure",
+};
+
 function sortLegendByOrder(entries, order) {
   const rank = (name) => {
     const i = order.indexOf(name);
@@ -92,7 +127,7 @@ function sortLegendByOrder(entries, order) {
 }
 
 function TemperatureSplitLegend(props) {
-  const { payload } = props;
+  const { payload, chartSeriesVisible, onToggleSeries } = props;
   if (!payload?.length) return null;
   const weather = sortLegendByOrder(
     payload.filter((e) => LEGEND_WEATHER.has(e.value)),
@@ -105,17 +140,54 @@ function TemperatureSplitLegend(props) {
   const renderEntry = (entry) => {
     const c = entry.color;
     const isBar = entry.type === "rect" || entry.type === "square";
+    const seriesKey = LEGEND_VALUE_TO_KEY[entry.value];
+    const visible = seriesKey ? !!chartSeriesVisible?.[seriesKey] : true;
+    const interactive = Boolean(seriesKey && onToggleSeries);
     return (
-      <Stack key={String(entry.dataKey ?? entry.value)} direction="row" alignItems="center" spacing={0.75}>
+      <Box
+        key={String(entry.dataKey ?? entry.value)}
+        component={interactive ? "button" : "div"}
+        type={interactive ? "button" : undefined}
+        onClick={interactive ? () => onToggleSeries(seriesKey) : undefined}
+        aria-pressed={interactive ? visible : undefined}
+        sx={{
+          display: "inline-flex",
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 0.75,
+          border: "none",
+          background: "none",
+          padding: 0,
+          margin: 0,
+          cursor: interactive ? "pointer" : "default",
+          opacity: visible ? 1 : 0.38,
+          transition: "opacity 0.18s ease",
+          color: "inherit",
+          font: "inherit",
+          textAlign: "left",
+          "&:hover": interactive
+            ? {
+                opacity: visible ? 0.88 : 0.52,
+              }
+            : undefined,
+          "&:focus-visible": interactive
+            ? {
+                outline: "2px solid rgba(255,255,255,0.35)",
+                outlineOffset: 2,
+                borderRadius: 0.5,
+              }
+            : undefined,
+        }}
+      >
         {isBar ? (
-          <Box sx={{ width: 14, height: 10, bgcolor: c, borderRadius: 0.5, opacity: 0.9 }} />
+          <Box sx={{ width: 14, height: 10, bgcolor: c, borderRadius: 0.5, flexShrink: 0, opacity: visible ? 0.95 : 0.55 }} />
         ) : (
-          <Box component="span" sx={{ width: 14, height: 3, bgcolor: c, borderRadius: 0.5, display: "inline-block" }} />
+          <Box component="span" sx={{ width: 14, height: 3, bgcolor: c, borderRadius: 0.5, display: "inline-block", flexShrink: 0, opacity: visible ? 1 : 0.55 }} />
         )}
         <Typography component="span" variant="caption" sx={{ color: "rgba(255,255,255,0.88)", whiteSpace: "nowrap" }}>
           {entry.value}
         </Typography>
-      </Stack>
+      </Box>
     );
   };
   return (
@@ -130,29 +202,36 @@ function TemperatureSplitLegend(props) {
         py: 0.5,
       }}
     >
-      <Box>
-        <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
-          Météo
+      <Box sx={{ width: "100%" }}>
+        <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.42)", display: "block", mb: 0.75 }}>
+          Cliquer sur une légende pour afficher ou masquer la série
         </Typography>
-        <Stack direction="row" flexWrap="wrap" useFlexGap spacing={1} columnGap={1.5} rowGap={0.75}>
-          {weather.map(renderEntry)}
-        </Stack>
-      </Box>
-      <Box sx={{ textAlign: { sm: "right" } }}>
-        <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
-          PAC
-        </Typography>
-        <Stack
-          direction="row"
-          flexWrap="wrap"
-          useFlexGap
-          spacing={1}
-          columnGap={1.5}
-          rowGap={0.75}
-          sx={{ justifyContent: { xs: "flex-start", sm: "flex-end" } }}
-        >
-          {pac.map(renderEntry)}
-        </Stack>
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2, alignItems: "flex-start" }}>
+          <Box sx={{ flex: { sm: "1 1 0" }, minWidth: 0 }}>
+            <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
+              Météo
+            </Typography>
+            <Stack direction="row" flexWrap="wrap" useFlexGap spacing={1} columnGap={1.5} rowGap={0.75}>
+              {weather.map(renderEntry)}
+            </Stack>
+          </Box>
+          <Box sx={{ flex: { sm: "1 1 0" }, minWidth: 0, textAlign: { sm: "right" } }}>
+            <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
+              PAC
+            </Typography>
+            <Stack
+              direction="row"
+              flexWrap="wrap"
+              useFlexGap
+              spacing={1}
+              columnGap={1.5}
+              rowGap={0.75}
+              sx={{ justifyContent: { xs: "flex-start", sm: "flex-end" } }}
+            >
+              {pac.map(renderEntry)}
+            </Stack>
+          </Box>
+        </Box>
       </Box>
     </Box>
   );
@@ -163,7 +242,7 @@ const followPeriods = [
   { id: "3d", label: "3 derniers jours" },
   { id: "7d", label: "Dernière semaine" },
   { id: "30d", label: "Dernier mois" },
-  { id: "365d", label: "Dernière année" },
+  { id: "90d", label: "3 derniers mois" },
 ];
 const weatherTabs = []; // construit dynamiquement (dates) après fetch forecast
 
@@ -202,6 +281,19 @@ export default function App() {
   /** Borne droite des graphiques de suivi (doit bouger avec l’heure réelle, pas seulement au changement de période). */
   const [chartNow, setChartNow] = useState(() => Date.now());
   const pauseGlobalRefreshUntilRef = useRef(0);
+  const refreshInFlightRef = useRef(false);
+  const pendingRefreshRef = useRef(false);
+
+  /** Courbes / barres affichées sur le graphique température (défaut : pas consigne, pas ext. PAC, pas Chamrousse). */
+  const [chartSeriesVisible, setChartSeriesVisible] = useState({
+    interieure: true,
+    consigne: false,
+    sechilienne: true,
+    chamrousse: false,
+    pacExterieure: false,
+    pluie: true,
+    neige: true,
+  });
 
   useEffect(() => {
     document.title = "Clots de la Charmette";
@@ -209,20 +301,31 @@ export default function App() {
 
   const refreshData = async () => {
     if (Date.now() < pauseGlobalRefreshUntilRef.current) return;
+    if (refreshInFlightRef.current) {
+      pendingRefreshRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
     try {
-      const [s, d, h, p, w, wh] = await Promise.allSettled([
-        api("/api/session"),
+      const s = await api("/api/session");
+      setSession(s);
+      if (!s?.authenticated) {
+        setDevice(null);
+        return;
+      }
+
+      // Device + historiques en parallèle : le serveur ne bloque plus /api/device sur tout le lot Open-Meteo.
+      const [dRes, h, p, w, wh] = await Promise.allSettled([
         api("/api/device"),
         api(`/api/history?period=${period}`),
         api(`/api/pac/trend?period=${period}`),
         api(`/api/pac/wifi-history?period=${period}`),
         api(`/api/weather/history?period=${period}`),
       ]);
-      if (s.status === "fulfilled") setSession(s.value);
-      if (d.status === "fulfilled") {
-        setDevice(normalizeDeviceFromApi(d.value));
-      } else if (d.status === "rejected") {
-        const msg = String(d.reason?.message || "");
+      if (dRes.status === "fulfilled") {
+        setDevice(dRes.value ? normalizeDeviceFromApi(dRes.value) : null);
+      } else {
+        const msg = String(dRes.reason?.message || "");
         if (msg.includes("Session MELCloud") || msg.includes("expirée") || msg.includes("Refresh token")) {
           setSession({ authenticated: false, email: null });
           setDevice(null);
@@ -233,11 +336,17 @@ export default function App() {
       if (p.status === "fulfilled") setPacTrend(p.value.points || []);
       if (w.status === "fulfilled") setWifiHistory(w.value.points || []);
       if (wh.status === "fulfilled") setWeatherHistory(wh.value.points || []);
-      if (s.status === "fulfilled" && s.value && !s.value.authenticated) {
-        setDevice(null);
-      }
+    } catch (e) {
+      setError(e.message);
     } finally {
+      refreshInFlightRef.current = false;
       setChartNow(Date.now());
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        queueMicrotask(() => {
+          refreshData().catch(() => {});
+        });
+      }
     }
   };
 
@@ -295,7 +404,16 @@ export default function App() {
   };
 
   const periodDomain = useMemo(() => {
-    const range = period === "24h" ? 24 * 3600e3 : period === "7d" ? 7 * 24 * 3600e3 : period === "30d" ? 30 * 24 * 3600e3 : period === "365d" ? 365 * 24 * 3600e3 : 3 * 24 * 3600e3;
+    const range =
+      period === "24h"
+        ? 24 * 3600e3
+        : period === "7d"
+          ? 7 * 24 * 3600e3
+          : period === "30d"
+            ? 30 * 24 * 3600e3
+            : period === "90d"
+              ? 90 * 24 * 3600e3
+              : 3 * 24 * 3600e3;
     return [chartNow - range, chartNow];
   }, [period, chartNow]);
 
@@ -407,12 +525,17 @@ export default function App() {
     return ranges.filter((x) => x.x2 > x.x1);
   }, [chartTempData, periodDomain, device?.power]);
   const tempYDomain = useMemo(() => {
-    const vals = chartTempData
-      .flatMap((p) => [p.interieure, p.consigne, p.pacExterieure, p.sechilienne, p.chamrousse])
-      .filter((v) => Number.isFinite(v));
+    const vals = [];
+    for (const p of chartTempData) {
+      if (chartSeriesVisible.interieure && Number.isFinite(p.interieure)) vals.push(p.interieure);
+      if (chartSeriesVisible.consigne && Number.isFinite(p.consigne)) vals.push(p.consigne);
+      if (chartSeriesVisible.pacExterieure && Number.isFinite(p.pacExterieure)) vals.push(p.pacExterieure);
+      if (chartSeriesVisible.sechilienne && Number.isFinite(p.sechilienne)) vals.push(p.sechilienne);
+      if (chartSeriesVisible.chamrousse && Number.isFinite(p.chamrousse)) vals.push(p.chamrousse);
+    }
     if (!vals.length) return [0, 30];
     return [Math.floor(Math.min(...vals) - 1), Math.ceil(Math.max(...vals) + 1)];
-  }, [chartTempData]);
+  }, [chartTempData, chartSeriesVisible]);
   const wifiYDomain = useMemo(() => {
     const vals = chartWifiData.flatMap((p) => [p.connectivite, p.rssi]).filter((v) => Number.isFinite(v));
     if (!vals.length) return [-100, 100];
@@ -430,11 +553,11 @@ export default function App() {
         ticks: 9,
       };
     }
-    if (period === "3d" || period === "7d" || period === "30d") {
+    if (period === "3d" || period === "7d" || period === "30d" || period === "90d") {
       return {
         tickFormatter: (v) =>
           new Date(v).toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "2-digit" }),
-        ticks: period === "30d" ? 10 : 8,
+        ticks: period === "90d" ? 12 : period === "30d" ? 10 : 8,
       };
     }
     return {
@@ -724,7 +847,7 @@ export default function App() {
               <Box sx={{ width: "100%", minHeight: 330, height: 330 }}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={320} minHeight={240}>
                   {trackingTab === "temperature" ? (
-                    <ComposedChart data={chartTempData} margin={{ top: 10, right: 18, left: 0, bottom: 6 }}>
+                    <ComposedChart data={chartTempData} margin={{ top: 10, right: 4, left: 0, bottom: 6 }}>
                       {/* Fond plus clair sur toute la hauteur du tracé quand la PAC est allumée (sous grille + courbes) */}
                       {pacOnRanges.map((r) => (
                         <ReferenceArea
@@ -745,13 +868,22 @@ export default function App() {
                       <YAxis
                         yAxisId="precip"
                         orientation="right"
+                        hide
                         domain={[0, (max) => Math.ceil((Number(max) || 0) + 1)]}
-                        tick={{ fill: "rgba(255,255,255,0.72)", fontSize: 11 }}
-                        tickLine={false}
-                        axisLine={{ stroke: "rgba(255,255,255,0.25)" }}
                       />
                       <Tooltip content={renderCleanTooltip(false)} />
-                      <Legend content={<TemperatureSplitLegend />} wrapperStyle={{ width: "100%" }} />
+                      <Legend
+                        content={(legendProps) => (
+                          <TemperatureSplitLegend
+                            {...legendProps}
+                            chartSeriesVisible={chartSeriesVisible}
+                            onToggleSeries={(key) =>
+                              setChartSeriesVisible((v) => ({ ...v, [key]: !v[key] }))
+                            }
+                          />
+                        )}
+                        wrapperStyle={{ width: "100%" }}
+                      />
                       <Bar
                         name="Pluie (La Charmette)"
                         dataKey="sechiliennePrecipitation"
@@ -759,7 +891,8 @@ export default function App() {
                         stackId="precipLaCharmette"
                         fill="rgba(96,165,250,0.85)"
                         shape={precipBarShape}
-                        isAnimationActive={false}
+                        {...TRACK_BAR_ANIM}
+                        hide={!chartSeriesVisible.pluie}
                       />
                       <Bar
                         name="Neige (La Charmette)"
@@ -768,14 +901,70 @@ export default function App() {
                         stackId="precipLaCharmette"
                         fill="rgba(226,232,240,0.80)"
                         shape={precipBarShape}
-                        isAnimationActive={false}
+                        {...TRACK_BAR_ANIM}
+                        hide={!chartSeriesVisible.neige}
                       />
 
-                      <Line yAxisId="temp" name="Extérieure La Charmette" type="monotone" dataKey="sechilienne" stroke="#60a5fa" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line yAxisId="temp" name="Extérieure Chamrousse" type="monotone" dataKey="chamrousse" stroke="#c084fc" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line yAxisId="temp" name="Température réelle PAC" type="monotone" dataKey="interieure" stroke="#2ed4bf" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line yAxisId="temp" name="Consigne PAC" type="monotone" dataKey="consigne" stroke="#f59e0b" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line yAxisId="temp" name="Extérieure (PAC)" type="monotone" dataKey="pacExterieure" stroke="#38bdf8" strokeWidth={lineWidth} dot={false} connectNulls />
+                      <Line
+                        yAxisId="temp"
+                        name="Extérieure La Charmette"
+                        type="monotone"
+                        dataKey="sechilienne"
+                        stroke="#60a5fa"
+                        strokeWidth={lineWidth}
+                        dot={false}
+                        connectNulls
+                        {...TRACK_LINE_ANIM}
+                        hide={!chartSeriesVisible.sechilienne}
+                      />
+                      <Line
+                        yAxisId="temp"
+                        name="Extérieure Chamrousse"
+                        type="monotone"
+                        dataKey="chamrousse"
+                        stroke="#c084fc"
+                        strokeWidth={lineWidth}
+                        dot={false}
+                        connectNulls
+                        {...TRACK_LINE_ANIM}
+                        hide={!chartSeriesVisible.chamrousse}
+                      />
+                      <Line
+                        yAxisId="temp"
+                        name="Température réelle PAC"
+                        type="monotone"
+                        dataKey="interieure"
+                        stroke="#2ed4bf"
+                        strokeWidth={lineWidth}
+                        dot={false}
+                        connectNulls
+                        {...TRACK_LINE_ANIM}
+                        hide={!chartSeriesVisible.interieure}
+                      />
+                      <Line
+                        yAxisId="temp"
+                        name="Consigne PAC"
+                        type="monotone"
+                        dataKey="consigne"
+                        stroke="#f59e0b"
+                        strokeWidth={lineWidth}
+                        dot={false}
+                        connectNulls
+                        {...TRACK_LINE_ANIM}
+                        hide={!chartSeriesVisible.consigne}
+                      />
+                      <Line
+                        yAxisId="temp"
+                        name="Extérieure (PAC)"
+                        type="monotone"
+                        dataKey="pacExterieure"
+                        stroke="#38bdf8"
+                        strokeWidth={lineWidth}
+                        dot={false}
+                        connectNulls
+                        {...TRACK_LINE_ANIM}
+                        hide={!chartSeriesVisible.pacExterieure}
+                      />
                     </ComposedChart>
                   ) : (
                     <LineChart data={chartWifiData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>
@@ -784,8 +973,8 @@ export default function App() {
                       <YAxis domain={wifiYDomain} {...axis} />
                       <Tooltip content={renderCleanTooltip(true)} />
                       <Legend />
-                      <Line name="Connectivite (%)" type="monotone" dataKey="connectivite" stroke="#22c55e" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line name="Signal RSSI (dBm)" type="monotone" dataKey="rssi" stroke="#ef4444" strokeWidth={lineWidth} dot={false} connectNulls />
+                      <Line name="Connectivite (%)" type="monotone" dataKey="connectivite" stroke="#22c55e" strokeWidth={lineWidth} dot={false} connectNulls {...TRACK_LINE_ANIM} />
+                      <Line name="Signal RSSI (dBm)" type="monotone" dataKey="rssi" stroke="#ef4444" strokeWidth={lineWidth} dot={false} connectNulls {...TRACK_LINE_ANIM} />
                     </LineChart>
                   )}
                 </ResponsiveContainer>

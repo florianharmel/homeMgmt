@@ -40,9 +40,12 @@ const state = {
   expiresAt: 0,
   device: null,
   history: [],
-  forecastCache: {
+  /** Open-Meteo : rafraîchi au plus une fois par heure (voir ensureWeatherServerCache). */
+  weatherServerCache: {
     updatedAt: 0,
-    byHorizon: {},
+    current: null,
+    forecastByHorizon: {},
+    historyByPeriod: {},
   },
   rawDevice: null,
   sampleIntervalMs: 30 * 1000,
@@ -57,9 +60,14 @@ const HISTORY_FILE = path.join(__dirname, "history-store.json");
 const AUTH_FILE = path.join(__dirname, "auth-store.json");
 const MAX_BACKUP_POINTS = 20000;
 
+/** Fenêtre minimale entre deux rafraîchissements Open-Meteo (toutes données météo regroupées). */
+const WEATHER_OPEN_METEO_TTL_MS = 60 * 60 * 1000;
+const WEATHER_HISTORY_PERIODS = ["24h", "3d", "7d", "30d", "90d"];
+let weatherServerCacheRefresh = null;
+
 function normalizePeriod(raw) {
   const p = String(raw || "3d").toLowerCase();
-  if (["24h", "3d", "7d", "30d", "365d"].includes(p)) return p;
+  if (["24h", "3d", "7d", "30d", "90d"].includes(p)) return p;
   return "3d";
 }
 
@@ -67,8 +75,24 @@ function periodToMs(period) {
   if (period === "24h") return 24 * 60 * 60 * 1000;
   if (period === "7d") return 7 * 24 * 60 * 60 * 1000;
   if (period === "30d") return 30 * 24 * 60 * 60 * 1000;
-  if (period === "365d") return 365 * 24 * 60 * 60 * 1000;
+  if (period === "90d") return 90 * 24 * 60 * 60 * 1000;
   return 3 * 24 * 60 * 60 * 1000;
+}
+
+/** Limite de points renvoyés au navigateur pour les courbes (largement suffisant pour l’écran, évite de figer Recharts). */
+const MAX_CHART_POINTS = 600;
+
+/** Sous-échantillonnage uniforme sur la série triée par temps (garde début + fin de plage). */
+function downsampleChartPoints(points, maxPoints = MAX_CHART_POINTS) {
+  if (!Array.isArray(points) || points.length <= maxPoints) return points;
+  const n = points.length;
+  const out = [];
+  const denom = Math.max(1, maxPoints - 1);
+  for (let i = 0; i < maxPoints; i += 1) {
+    const idx = Math.round((i * (n - 1)) / denom);
+    out.push(points[idx]);
+  }
+  return out;
 }
 
 function loadBackupHistory() {
@@ -227,7 +251,10 @@ function deepFindString(input, keys) {
   return found;
 }
 
+const HTTP_TIMEOUT_MS = 25_000;
+
 function httpsRequest(url, options = {}, body) {
+  const timeoutMs = options.timeoutMs ?? HTTP_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request(
@@ -240,19 +267,71 @@ function httpsRequest(url, options = {}, body) {
       (res) => {
         let data = "";
         res.on("data", (c) => (data += c));
-        res.on("end", () =>
+        res.on("end", () => {
+          clearTimeout(timer);
           resolve({
             status: res.statusCode || 500,
             headers: res.headers,
             body: data,
-          }),
-        );
+          });
+        });
       },
     );
-    req.on("error", reject);
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error(`Timeout MELCloud / HTTPS après ${timeoutMs}ms`));
+    }, timeoutMs);
+    req.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
     if (body) req.write(body);
     req.end();
   });
+}
+
+const FETCH_TIMEOUT_MS = 25_000;
+const OPEN_METEO_FETCH_MAX_RETRIES = 5;
+/** Au-delà, l’API forecast renvoie 400 (« Past days … Allowed range 0 to 93 ») — utiliser l’API archive. */
+const OPEN_METEO_FORECAST_MAX_PAST_DAYS = 93;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** fetch JSON avec AbortSignal pour éviter les requêtes bloquées indéfiniment (Open-Meteo, etc.). Retries sur 429 (rate limit). */
+async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS, attempt = 0) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    if (r.status === 429 && attempt < OPEN_METEO_FETCH_MAX_RETRIES) {
+      clearTimeout(timer);
+      let waitMs = 1500 * 2 ** attempt;
+      const ra = r.headers.get("retry-after");
+      if (ra && /^\d+(\.\d+)?$/.test(String(ra).trim())) {
+        waitMs = Math.min(Number(ra) * 1000, 120_000);
+      }
+      await delay(waitMs);
+      return fetchJson(url, timeoutMs, attempt + 1);
+    }
+    if (!r.ok) {
+      let detail = "";
+      try {
+        const j = await r.json();
+        if (j?.reason) detail = `: ${j.reason}`;
+      } catch (_) {
+        /* corps non JSON */
+      }
+      throw new Error(`HTTP ${r.status}${detail}`);
+    }
+    return await r.json();
+  } catch (e) {
+    if (e?.name === "AbortError") throw new Error(`Timeout Open-Meteo après ${timeoutMs}ms`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function getTokenFromRefreshToken() {
@@ -687,7 +766,7 @@ function readPowerFromMonitor(monitor) {
   return null;
 }
 
-async function refreshDevice() {
+async function refreshDeviceImpl() {
   const context = await melcloudApi("/context");
   const units = (context?.buildings || []).flatMap((b) => b.airToAirUnits || []);
   if (!units.length) throw new Error("Aucune PAC trouvée");
@@ -738,12 +817,13 @@ async function refreshDevice() {
     fanSpeed,
   };
 
-  let weather = { sechilienneTemp: null, chamrousseTemp: null };
-  try {
-    weather = await fetchWeatherCurrent();
-  } catch (_e) {
-    // Do not block PAC live sampling if weather API is temporarily unavailable.
-  }
+  // Ne pas attendre Open-Meteo : le cache est rempli en arrière-plan (ensureWeatherServerCache).
+  kickWeatherCacheIfStale();
+  const weather =
+    state.weatherServerCache.current ?? {
+      sechilienneTemp: null,
+      chamrousseTemp: null,
+    };
   const now = Date.now();
   const lastPoint = state.history[state.history.length - 1];
   // Sample history on a fixed interval so long-term curves are available.
@@ -763,13 +843,28 @@ async function refreshDevice() {
   }
 }
 
-async function fetchWeatherCurrent() {
-  const s = await fetch(
-    "https://api.open-meteo.com/v1/forecast?latitude=45.0773044&longitude=5.8421642&current=temperature_2m&models=meteofrance_seamless",
-  ).then((r) => r.json());
-  const c = await fetch(
-    "https://api.open-meteo.com/v1/forecast?latitude=45.1267&longitude=5.8747&current=temperature_2m&models=meteofrance_seamless",
-  ).then((r) => r.json());
+/** Une seule exécution de refresh à la fois : les appels parallèles (/api/device + /api/history + …) partagent le même travail. */
+let refreshDeviceInFlight = null;
+
+async function refreshDevice() {
+  if (refreshDeviceInFlight) {
+    return refreshDeviceInFlight;
+  }
+  refreshDeviceInFlight = refreshDeviceImpl().finally(() => {
+    refreshDeviceInFlight = null;
+  });
+  return refreshDeviceInFlight;
+}
+
+async function fetchWeatherCurrentFromApi() {
+  const [s, c] = await Promise.all([
+    fetchJson(
+      "https://api.open-meteo.com/v1/forecast?latitude=45.0773044&longitude=5.8421642&current=temperature_2m&models=meteofrance_seamless",
+    ),
+    fetchJson(
+      "https://api.open-meteo.com/v1/forecast?latitude=45.1267&longitude=5.8747&current=temperature_2m&models=meteofrance_seamless",
+    ),
+  ]);
   const sNow = s?.current?.temperature_2m;
   const cNow = c?.current?.temperature_2m;
   return {
@@ -816,7 +911,7 @@ async function fetchDayPartsFor(latitude, longitude, days = 4) {
     "&hourly=temperature_2m,precipitation,snowfall,weather_code" +
     "&models=meteofrance_seamless" +
     "&timezone=auto";
-  const data = await fetch(url).then((r) => r.json());
+  const data = await fetchJson(url);
   const times = data?.hourly?.time || [];
   const temps = data?.hourly?.temperature_2m || [];
   const precs = data?.hourly?.precipitation || [];
@@ -876,7 +971,7 @@ async function fetchForecastFor(latitude, longitude, days) {
     `&forecast_days=${days}` +
     "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,weather_code" +
     "&models=meteofrance_seamless";
-  const data = await fetch(url).then((r) => r.json());
+  const data = await fetchJson(url);
   const timeline = data?.daily?.time || [];
   return timeline.map((day, idx) => {
     const weatherCode = data.daily.weather_code?.[idx];
@@ -894,22 +989,14 @@ async function fetchForecastFor(latitude, longitude, days) {
   });
 }
 
-async function fetchForecast(horizonDays) {
-  const now = Date.now();
-  const cached = state.forecastCache.byHorizon[horizonDays];
-  const cachedPartsKeys = cached?.data?.parts?.sechilienne ? Object.keys(cached.data.parts.sechilienne) : [];
-  const cachedLooksLegacy = cachedPartsKeys.includes("today") || cachedPartsKeys.includes("tomorrow");
-  if (cached && !cachedLooksLegacy && now - cached.updatedAt < 15 * 60 * 1000) {
-    return cached.data;
-  }
-
+async function buildForecastPayload(horizonDays) {
   const [sechilienne, chamrousse, sechParts, chamParts] = await Promise.all([
     fetchForecastFor(45.0773044, 5.8421642, horizonDays),
     fetchForecastFor(45.1267, 5.8747, horizonDays),
     fetchDayPartsFor(45.0773044, 5.8421642, horizonDays),
     fetchDayPartsFor(45.1267, 5.8747, horizonDays),
   ]);
-  const data = {
+  return {
     horizonDays,
     sechilienne,
     chamrousse,
@@ -918,24 +1005,34 @@ async function fetchForecast(horizonDays) {
       chamrousse: chamParts,
     },
   };
-  state.forecastCache.byHorizon[horizonDays] = { updatedAt: now, data };
-  return data;
 }
 
-async function fetchWeatherHistory(period) {
+async function fetchWeatherHistoryFromApi(period) {
   const now = new Date();
   const rangeMs = periodToMs(period);
   const start = new Date(now.getTime() - rangeMs);
   const pastDays = Math.max(1, Math.ceil(rangeMs / (24 * 60 * 60 * 1000)));
 
   async function onePlace(latitude, longitude) {
-    const url =
-      "https://api.open-meteo.com/v1/forecast" +
-      `?latitude=${latitude}&longitude=${longitude}` +
-      `&past_days=${pastDays}&forecast_days=1` +
-      "&hourly=temperature_2m,precipitation,snowfall,weather_code" +
-      "&models=meteofrance_seamless";
-    const data = await fetch(url).then((r) => r.json());
+    let data;
+    if (pastDays <= OPEN_METEO_FORECAST_MAX_PAST_DAYS) {
+      const url =
+        "https://api.open-meteo.com/v1/forecast" +
+        `?latitude=${latitude}&longitude=${longitude}` +
+        `&past_days=${pastDays}&forecast_days=1` +
+        "&hourly=temperature_2m,precipitation,snowfall,weather_code" +
+        "&models=meteofrance_seamless";
+      data = await fetchJson(url);
+    } else {
+      const startDate = start.toISOString().slice(0, 10);
+      const endDate = now.toISOString().slice(0, 10);
+      const url =
+        "https://archive-api.open-meteo.com/v1/archive" +
+        `?latitude=${latitude}&longitude=${longitude}` +
+        `&start_date=${startDate}&end_date=${endDate}` +
+        "&hourly=temperature_2m,precipitation,snowfall,weather_code";
+      data = await fetchJson(url);
+    }
     const times = data?.hourly?.time || [];
     return times.map((t, idx) => ({
       ts: new Date(t).getTime(),
@@ -972,6 +1069,79 @@ async function fetchWeatherHistory(period) {
   return Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
 }
 
+/** Déclenche un remplissage cache météo sans bloquer l’appelant (ex. refresh PAC). */
+function kickWeatherCacheIfStale() {
+  const now = Date.now();
+  const c = state.weatherServerCache;
+  if (c.updatedAt && now - c.updatedAt < WEATHER_OPEN_METEO_TTL_MS) return;
+  if (weatherServerCacheRefresh) return;
+  ensureWeatherServerCache().catch(() => {});
+}
+
+/**
+ * Toutes les données Open-Meteo sont rafraîchies ensemble au plus une fois par heure (mutex + TTL).
+ * Les routes /api/weather/* attendent ce lot ; /api/device ne l’attend plus (voir refreshDeviceImpl).
+ */
+async function ensureWeatherServerCache() {
+  const now = Date.now();
+  const c = state.weatherServerCache;
+  if (c.updatedAt && now - c.updatedAt < WEATHER_OPEN_METEO_TTL_MS) {
+    return;
+  }
+  if (weatherServerCacheRefresh) {
+    await weatherServerCacheRefresh;
+    return;
+  }
+  weatherServerCacheRefresh = (async () => {
+    try {
+      const [current, forecast4] = await Promise.all([
+        fetchWeatherCurrentFromApi(),
+        buildForecastPayload(4),
+      ]);
+      const histories = await Promise.all(WEATHER_HISTORY_PERIODS.map((p) => fetchWeatherHistoryFromApi(p)));
+      const historyByPeriod = {};
+      WEATHER_HISTORY_PERIODS.forEach((p, i) => {
+        historyByPeriod[p] = histories[i];
+      });
+      const ts = Date.now();
+      state.weatherServerCache = {
+        updatedAt: ts,
+        current,
+        forecastByHorizon: { 4: forecast4 },
+        historyByPeriod,
+      };
+    } finally {
+      weatherServerCacheRefresh = null;
+    }
+  })();
+  await weatherServerCacheRefresh;
+}
+
+function forecastPayloadLooksLegacy(data) {
+  const keys = data?.parts?.sechilienne ? Object.keys(data.parts.sechilienne) : [];
+  return keys.includes("today") || keys.includes("tomorrow");
+}
+
+async function fetchForecast(horizonDays) {
+  await ensureWeatherServerCache();
+  let data = state.weatherServerCache.forecastByHorizon[horizonDays];
+  if (data && !forecastPayloadLooksLegacy(data)) {
+    return data;
+  }
+  const ts = Date.now();
+  data = await buildForecastPayload(horizonDays);
+  state.weatherServerCache.forecastByHorizon[horizonDays] = data;
+  return data;
+}
+
+async function fetchWeatherHistory(period) {
+  const safePeriod = normalizePeriod(period);
+  await ensureWeatherServerCache();
+  const cached = state.weatherServerCache.historyByPeriod[safePeriod];
+  if (cached) return cached;
+  return fetchWeatherHistoryFromApi(safePeriod);
+}
+
 function formatMelcloudDate(date) {
   // MELCloud accepts ISO-like timestamps without timezone suffix.
   return date.toISOString().replace("Z", "0000");
@@ -1004,7 +1174,7 @@ async function fetchPacTrendSummary(unitId, period) {
   const rangeMs = periodToMs(period);
   const from = new Date(now.getTime() - rangeMs);
   const summaryPeriod =
-    period === "365d" ? "Yearly" : period === "30d" ? "Monthly" : period === "7d" ? "Weekly" : "Daily";
+    period === "90d" || period === "30d" ? "Monthly" : period === "7d" ? "Weekly" : "Daily";
   const query =
     `/report/trendsummary?unitId=${encodeURIComponent(unitId)}` +
     `&period=${summaryPeriod}` +
@@ -1244,7 +1414,8 @@ app.post("/api/device/control", async (req, res) => {
 
 app.get("/api/history", async (req, res) => {
   try {
-    if (state.refreshToken) await refreshDevice();
+    // Pas de second refreshDevice si la PAC est déjà connue : le batch front appelle /api/device en parallèle (mutex).
+    if (state.refreshToken && !state.device?.id) await refreshDevice();
     const period = normalizePeriod(req.query.period);
     const now = Date.now();
     const rangeMs = periodToMs(period);
@@ -1256,8 +1427,17 @@ app.get("/api/history", async (req, res) => {
     for (const p of backupPoints) mergedByTs.set(p.ts, p);
     for (const p of livePoints) mergedByTs.set(p.ts, p);
 
-    const points = Array.from(mergedByTs.values()).sort((a, b) => a.ts - b.ts);
-    res.json({ points, meta: { liveCount: livePoints.length, backupCount: backupPoints.length } });
+    const merged = Array.from(mergedByTs.values()).sort((a, b) => a.ts - b.ts);
+    const points = downsampleChartPoints(merged);
+    res.json({
+      points,
+      meta: {
+        liveCount: livePoints.length,
+        backupCount: backupPoints.length,
+        mergedCount: merged.length,
+        returnedCount: points.length,
+      },
+    });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1268,8 +1448,9 @@ app.get("/api/pac/trend", async (req, res) => {
     if (!state.refreshToken) throw new Error("Non authentifié");
     if (!state.device?.id) await refreshDevice();
     const safePeriod = normalizePeriod(req.query.period);
-    const points = await fetchPacTrendSummary(state.device.id, safePeriod);
-    res.json({ points });
+    const raw = await fetchPacTrendSummary(state.device.id, safePeriod);
+    const points = downsampleChartPoints(raw);
+    res.json({ points, meta: { sourceCount: raw.length, returnedCount: points.length } });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1280,8 +1461,9 @@ app.get("/api/pac/wifi-history", async (req, res) => {
     if (!state.refreshToken) throw new Error("Non authentifié");
     if (!state.device?.id) await refreshDevice();
     const safePeriod = normalizePeriod(req.query.period);
-    const points = await fetchWifiHistory(state.device.id, safePeriod);
-    res.json({ points });
+    const raw = await fetchWifiHistory(state.device.id, safePeriod);
+    const points = downsampleChartPoints(raw);
+    res.json({ points, meta: { sourceCount: raw.length, returnedCount: points.length } });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1301,8 +1483,9 @@ app.get("/api/weather/forecast", async (req, res) => {
 app.get("/api/weather/history", async (req, res) => {
   try {
     const safePeriod = normalizePeriod(req.query.period);
-    const points = await fetchWeatherHistory(safePeriod);
-    res.json({ points });
+    const raw = await fetchWeatherHistory(safePeriod);
+    const points = downsampleChartPoints(raw);
+    res.json({ points, meta: { sourceCount: raw.length, returnedCount: points.length } });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1337,4 +1520,5 @@ const PORT = Number(process.env.PORT) || 8787;
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`API MELCloud lancée sur le port ${PORT}`);
+  kickWeatherCacheIfStale();
 });
