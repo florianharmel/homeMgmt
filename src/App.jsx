@@ -199,7 +199,8 @@ export default function App() {
   const [controlBusy, setControlBusy] = useState(false);
   const [error, setError] = useState("");
   const weatherScrollRef = useRef(null);
-  const nowRef = useRef(Date.now());
+  /** Borne droite des graphiques de suivi (doit bouger avec l’heure réelle, pas seulement au changement de période). */
+  const [chartNow, setChartNow] = useState(() => Date.now());
   const pauseGlobalRefreshUntilRef = useRef(0);
 
   useEffect(() => {
@@ -208,32 +209,35 @@ export default function App() {
 
   const refreshData = async () => {
     if (Date.now() < pauseGlobalRefreshUntilRef.current) return;
-    nowRef.current = Date.now();
-    const [s, d, h, p, w, wh] = await Promise.allSettled([
-      api("/api/session"),
-      api("/api/device"),
-      api(`/api/history?period=${period}`),
-      api(`/api/pac/trend?period=${period}`),
-      api(`/api/pac/wifi-history?period=${period}`),
-      api(`/api/weather/history?period=${period}`),
-    ]);
-    if (s.status === "fulfilled") setSession(s.value);
-    if (d.status === "fulfilled") {
-      setDevice(normalizeDeviceFromApi(d.value));
-    } else if (d.status === "rejected") {
-      const msg = String(d.reason?.message || "");
-      if (msg.includes("Session MELCloud") || msg.includes("expirée") || msg.includes("Refresh token")) {
-        setSession({ authenticated: false, email: null });
-        setDevice(null);
-        setError(msg);
+    try {
+      const [s, d, h, p, w, wh] = await Promise.allSettled([
+        api("/api/session"),
+        api("/api/device"),
+        api(`/api/history?period=${period}`),
+        api(`/api/pac/trend?period=${period}`),
+        api(`/api/pac/wifi-history?period=${period}`),
+        api(`/api/weather/history?period=${period}`),
+      ]);
+      if (s.status === "fulfilled") setSession(s.value);
+      if (d.status === "fulfilled") {
+        setDevice(normalizeDeviceFromApi(d.value));
+      } else if (d.status === "rejected") {
+        const msg = String(d.reason?.message || "");
+        if (msg.includes("Session MELCloud") || msg.includes("expirée") || msg.includes("Refresh token")) {
+          setSession({ authenticated: false, email: null });
+          setDevice(null);
+          setError(msg);
+        }
       }
-    }
-    if (h.status === "fulfilled") setHistory(h.value.points || []);
-    if (p.status === "fulfilled") setPacTrend(p.value.points || []);
-    if (w.status === "fulfilled") setWifiHistory(w.value.points || []);
-    if (wh.status === "fulfilled") setWeatherHistory(wh.value.points || []);
-    if (s.status === "fulfilled" && s.value && !s.value.authenticated) {
-      setDevice(null);
+      if (h.status === "fulfilled") setHistory(h.value.points || []);
+      if (p.status === "fulfilled") setPacTrend(p.value.points || []);
+      if (w.status === "fulfilled") setWifiHistory(w.value.points || []);
+      if (wh.status === "fulfilled") setWeatherHistory(wh.value.points || []);
+      if (s.status === "fulfilled" && s.value && !s.value.authenticated) {
+        setDevice(null);
+      }
+    } finally {
+      setChartNow(Date.now());
     }
   };
 
@@ -242,6 +246,12 @@ export default function App() {
     const t = setInterval(() => refreshData().catch(() => {}), 30000);
     return () => clearInterval(t);
   }, [period]);
+
+  /** Fait avancer la borne droite du graphique même entre deux chargements de données. */
+  useEffect(() => {
+    const t = setInterval(() => setChartNow(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     api("/api/weather/forecast?horizon=4")
@@ -285,10 +295,9 @@ export default function App() {
   };
 
   const periodDomain = useMemo(() => {
-    const now = nowRef.current || Date.now();
     const range = period === "24h" ? 24 * 3600e3 : period === "7d" ? 7 * 24 * 3600e3 : period === "30d" ? 30 * 24 * 3600e3 : period === "365d" ? 365 * 24 * 3600e3 : 3 * 24 * 3600e3;
-    return [now - range, now];
-  }, [period]);
+    return [chartNow - range, chartNow];
+  }, [period, chartNow]);
 
   const tempData = useMemo(() => {
     const map = new Map();
@@ -350,12 +359,15 @@ export default function App() {
 
   const wifiData = useMemo(() => wifiHistory.map((p) => ({ ts: p.ts, connectivite: p.connectivite ?? 100, rssi: p.rssi ?? null })), [wifiHistory]);
 
+  const chartTempData = useMemo(() => tempData.filter((r) => Number.isFinite(r.ts) && r.ts <= chartNow), [tempData, chartNow]);
+  const chartWifiData = useMemo(() => wifiData.filter((r) => Number.isFinite(r.ts) && r.ts <= chartNow), [wifiData, chartNow]);
+
   const pacOnRanges = useMemo(() => {
     const [start, end] = periodDomain;
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
 
-    // Work on a slice inside the visible period (tempData can include a bit outside due to merges).
-    const rows = tempData
+    // Work on a slice inside the visible period (chartTempData exclut tout point > maintenant).
+    const rows = chartTempData
       .filter((r) => Number.isFinite(r?.ts) && r.ts >= start && r.ts <= end)
       .map((r) => ({ ts: r.ts, pacOn: typeof r.pacOn === "boolean" ? r.pacOn : null }))
       .sort((a, b) => a.ts - b.ts);
@@ -393,19 +405,19 @@ export default function App() {
       ranges.push({ x1: rangeStart, x2: end });
     }
     return ranges.filter((x) => x.x2 > x.x1);
-  }, [tempData, periodDomain, device?.power]);
+  }, [chartTempData, periodDomain, device?.power]);
   const tempYDomain = useMemo(() => {
-    const vals = tempData
+    const vals = chartTempData
       .flatMap((p) => [p.interieure, p.consigne, p.pacExterieure, p.sechilienne, p.chamrousse])
       .filter((v) => Number.isFinite(v));
     if (!vals.length) return [0, 30];
     return [Math.floor(Math.min(...vals) - 1), Math.ceil(Math.max(...vals) + 1)];
-  }, [tempData]);
+  }, [chartTempData]);
   const wifiYDomain = useMemo(() => {
-    const vals = wifiData.flatMap((p) => [p.connectivite, p.rssi]).filter((v) => Number.isFinite(v));
+    const vals = chartWifiData.flatMap((p) => [p.connectivite, p.rssi]).filter((v) => Number.isFinite(v));
     if (!vals.length) return [-100, 100];
     return [Math.floor(Math.min(...vals) - 5), Math.ceil(Math.max(...vals) + 5)];
-  }, [wifiData]);
+  }, [chartWifiData]);
 
   const axis = { tick: { fill: "rgba(255,255,255,0.72)", fontSize: 12 }, tickLine: false, axisLine: { stroke: "rgba(255,255,255,0.25)" } };
   const tooltip = { contentStyle: { background: "rgba(8,14,28,.95)", border: "1px solid rgba(255,255,255,.16)", borderRadius: 10, color: "#fff" }, labelStyle: { color: "#cbd5e1" } };
@@ -712,7 +724,7 @@ export default function App() {
               <Box sx={{ width: "100%", minHeight: 330, height: 330 }}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={320} minHeight={240}>
                   {trackingTab === "temperature" ? (
-                    <ComposedChart data={tempData} margin={{ top: 10, right: 18, left: 0, bottom: 6 }}>
+                    <ComposedChart data={chartTempData} margin={{ top: 10, right: 18, left: 0, bottom: 6 }}>
                       {/* Fond plus clair sur toute la hauteur du tracé quand la PAC est allumée (sous grille + courbes) */}
                       {pacOnRanges.map((r) => (
                         <ReferenceArea
@@ -766,7 +778,7 @@ export default function App() {
                       <Line yAxisId="temp" name="Extérieure (PAC)" type="monotone" dataKey="pacExterieure" stroke="#38bdf8" strokeWidth={lineWidth} dot={false} connectNulls />
                     </ComposedChart>
                   ) : (
-                    <LineChart data={wifiData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>
+                    <LineChart data={chartWifiData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="ts" type="number" domain={periodDomain} {...axis} tickFormatter={xScaleConfig.tickFormatter} tickCount={xScaleConfig.ticks} interval="preserveStartEnd" />
                       <YAxis domain={wifiYDomain} {...axis} />
