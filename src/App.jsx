@@ -78,6 +78,86 @@ function ModeIcon({ mode, sx }) {
   const Icon = modeIconComponent[m] || Lightbulb;
   return <Icon sx={sx} aria-hidden />;
 }
+
+const LEGEND_WEATHER = new Set(["Pluie (La Charmette)", "Neige (La Charmette)", "Extérieure La Charmette", "Extérieure Chamrousse"]);
+const WEATHER_LEGEND_ORDER = ["Pluie (La Charmette)", "Neige (La Charmette)", "Extérieure La Charmette", "Extérieure Chamrousse"];
+const PAC_LEGEND_ORDER = ["Température réelle PAC", "Consigne PAC", "Extérieure (PAC)"];
+
+function sortLegendByOrder(entries, order) {
+  const rank = (name) => {
+    const i = order.indexOf(name);
+    return i === -1 ? 1000 : i;
+  };
+  return [...entries].sort((a, b) => rank(a.value) - rank(b.value));
+}
+
+function TemperatureSplitLegend(props) {
+  const { payload } = props;
+  if (!payload?.length) return null;
+  const weather = sortLegendByOrder(
+    payload.filter((e) => LEGEND_WEATHER.has(e.value)),
+    WEATHER_LEGEND_ORDER,
+  );
+  const pac = sortLegendByOrder(
+    payload.filter((e) => !LEGEND_WEATHER.has(e.value)),
+    PAC_LEGEND_ORDER,
+  );
+  const renderEntry = (entry) => {
+    const c = entry.color;
+    const isBar = entry.type === "rect" || entry.type === "square";
+    return (
+      <Stack key={String(entry.dataKey ?? entry.value)} direction="row" alignItems="center" spacing={0.75}>
+        {isBar ? (
+          <Box sx={{ width: 14, height: 10, bgcolor: c, borderRadius: 0.5, opacity: 0.9 }} />
+        ) : (
+          <Box component="span" sx={{ width: 14, height: 3, bgcolor: c, borderRadius: 0.5, display: "inline-block" }} />
+        )}
+        <Typography component="span" variant="caption" sx={{ color: "rgba(255,255,255,0.88)", whiteSpace: "nowrap" }}>
+          {entry.value}
+        </Typography>
+      </Stack>
+    );
+  };
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: { xs: "column", sm: "row" },
+        justifyContent: "space-between",
+        alignItems: { xs: "stretch", sm: "flex-start" },
+        gap: 1.5,
+        width: "100%",
+        py: 0.5,
+      }}
+    >
+      <Box>
+        <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
+          Météo
+        </Typography>
+        <Stack direction="row" flexWrap="wrap" useFlexGap spacing={1} columnGap={1.5} rowGap={0.75}>
+          {weather.map(renderEntry)}
+        </Stack>
+      </Box>
+      <Box sx={{ textAlign: { sm: "right" } }}>
+        <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
+          PAC
+        </Typography>
+        <Stack
+          direction="row"
+          flexWrap="wrap"
+          useFlexGap
+          spacing={1}
+          columnGap={1.5}
+          rowGap={0.75}
+          sx={{ justifyContent: { xs: "flex-start", sm: "flex-end" } }}
+        >
+          {pac.map(renderEntry)}
+        </Stack>
+      </Box>
+    </Box>
+  );
+}
+
 const followPeriods = [
   { id: "24h", label: "Dernières 24h" },
   { id: "3d", label: "3 derniers jours" },
@@ -212,10 +292,25 @@ export default function App() {
 
   const tempData = useMemo(() => {
     const map = new Map();
-    for (const p of history) map.set(p.ts, { ts: p.ts, interieure: Number(p.indoorTemp), consigne: Number(p.targetTemp), pacOn: !!p.power });
+    for (const p of history) {
+      const ot = Number(p.outdoorTemp);
+      map.set(p.ts, {
+        ts: p.ts,
+        interieure: Number(p.indoorTemp),
+        consigne: Number(p.targetTemp),
+        pacOn: !!p.power,
+        pacExterieure: Number.isFinite(ot) ? ot : null,
+      });
+    }
     for (const p of pacTrend) {
       const cur = map.get(p.ts) || { ts: p.ts };
-      map.set(p.ts, { ...cur, interieure: Number.isFinite(Number(p.indoorTemp)) ? Number(p.indoorTemp) : cur.interieure, consigne: Number.isFinite(Number(p.targetTemp)) ? Number(p.targetTemp) : cur.consigne });
+      const otTrend = Number(p.outdoorTemp);
+      map.set(p.ts, {
+        ...cur,
+        interieure: Number.isFinite(Number(p.indoorTemp)) ? Number(p.indoorTemp) : cur.interieure,
+        consigne: Number.isFinite(Number(p.targetTemp)) ? Number(p.targetTemp) : cur.consigne,
+        pacExterieure: Number.isFinite(otTrend) ? otTrend : cur.pacExterieure ?? null,
+      });
     }
     for (const p of weatherHistory) {
       const cur = map.get(p.ts) || { ts: p.ts };
@@ -297,7 +392,9 @@ export default function App() {
     return ranges.filter((x) => x.x2 > x.x1);
   }, [tempData, periodDomain, device?.power]);
   const tempYDomain = useMemo(() => {
-    const vals = tempData.flatMap((p) => [p.interieure, p.consigne, p.sechilienne, p.chamrousse]).filter((v) => Number.isFinite(v));
+    const vals = tempData
+      .flatMap((p) => [p.interieure, p.consigne, p.pacExterieure, p.sechilienne, p.chamrousse])
+      .filter((v) => Number.isFinite(v));
     if (!vals.length) return [0, 30];
     return [Math.floor(Math.min(...vals) - 1), Math.ceil(Math.max(...vals) + 1)];
   }, [tempData]);
@@ -447,6 +544,17 @@ export default function App() {
                         <PowerSettingsNew sx={{ fontSize: 38, opacity: 0.72 }} aria-hidden />
                       )}
                     </Box>
+                  </Stack>
+                  <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.72)", display: "block", mt: 1.5 }}>
+                    Extérieure (sonde PAC)
+                  </Typography>
+                  <Stack direction="row" alignItems="baseline" spacing={1}>
+                    <Typography variant="h5" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
+                      {Number.isFinite(Number(device?.outdoorTemp)) ? Number(device.outdoorTemp).toFixed(1) : "--"}
+                    </Typography>
+                    <Typography variant="body1" sx={{ opacity: 0.85 }}>
+                      °C
+                    </Typography>
                   </Stack>
                 </Box>
                 <Stack direction="row" spacing={1} alignItems="center">
@@ -610,7 +718,7 @@ export default function App() {
                         axisLine={{ stroke: "rgba(255,255,255,0.25)" }}
                       />
                       <Tooltip content={renderCleanTooltip(false)} />
-                      <Legend />
+                      <Legend content={<TemperatureSplitLegend />} wrapperStyle={{ width: "100%" }} />
                       {pacOnRanges.map((r) => (
                         <ReferenceArea
                           key={`${Math.round(r.x1)}-${Math.round(r.x2)}`}
@@ -641,10 +749,11 @@ export default function App() {
                         isAnimationActive={false}
                       />
 
-                      <Line yAxisId="temp" name="Température réelle PAC" type="monotone" dataKey="interieure" stroke="#2ed4bf" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line yAxisId="temp" name="Consigne PAC" type="monotone" dataKey="consigne" stroke="#f59e0b" strokeWidth={lineWidth} dot={false} connectNulls />
                       <Line yAxisId="temp" name="Extérieure La Charmette" type="monotone" dataKey="sechilienne" stroke="#60a5fa" strokeWidth={lineWidth} dot={false} connectNulls />
                       <Line yAxisId="temp" name="Extérieure Chamrousse" type="monotone" dataKey="chamrousse" stroke="#c084fc" strokeWidth={lineWidth} dot={false} connectNulls />
+                      <Line yAxisId="temp" name="Température réelle PAC" type="monotone" dataKey="interieure" stroke="#2ed4bf" strokeWidth={lineWidth} dot={false} connectNulls />
+                      <Line yAxisId="temp" name="Consigne PAC" type="monotone" dataKey="consigne" stroke="#f59e0b" strokeWidth={lineWidth} dot={false} connectNulls />
+                      <Line yAxisId="temp" name="Extérieure (PAC)" type="monotone" dataKey="pacExterieure" stroke="#38bdf8" strokeWidth={lineWidth} dot={false} connectNulls />
                     </ComposedChart>
                   ) : (
                     <LineChart data={wifiData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>

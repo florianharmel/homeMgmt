@@ -694,6 +694,13 @@ async function refreshDevice() {
       "actualtemperature",
       "returnairtemperature",
     ]) ?? 0;
+  const outdoorTemp = deepFindNumber(merged, [
+    "outside_temperature",
+    "outsidetemperature",
+    "outdoortemperature",
+    "outdoorairtemperature",
+    "ambientoutdoortemperature",
+  ]);
   const targetTemp =
     deepFindNumber(merged, ["settemperature", "targettemperature", "desiredtemperature"]) ?? 21;
   const power = deepFindBool(merged, ["power", "ispoweron", "ison"]) ?? false;
@@ -707,6 +714,7 @@ async function refreshDevice() {
     isConnected: !!unit.isConnected,
     rssi: unit.rssi,
     indoorTemp,
+    outdoorTemp: Number.isFinite(outdoorTemp) ? outdoorTemp : null,
     targetTemp,
     power,
     operationMode,
@@ -727,6 +735,7 @@ async function refreshDevice() {
       ts: now,
       indoorTemp: state.device.indoorTemp,
       targetTemp: state.device.targetTemp,
+      outdoorTemp: state.device.outdoorTemp,
       power: state.device.power,
       sechilienneTemp: weather.sechilienneTemp,
       chamrousseTemp: weather.chamrousseTemp,
@@ -959,6 +968,20 @@ function findDatasetByLabel(datasets, keys) {
   });
 }
 
+function findOutdoorTemperatureDataset(datasets) {
+  if (!Array.isArray(datasets)) return null;
+  const byId = datasets.find((d) => String(d?.id || "").toLowerCase() === "outside_temperature");
+  if (byId?.data?.length) return byId;
+  return (
+    findDatasetByLabel(datasets, [
+      "OUTSIDE_TEMPERATURE",
+      "OUTDOOR_TEMPERATURE",
+      "OUTDOOR",
+      "OUTDOO",
+    ]) || null
+  );
+}
+
 async function fetchPacTrendSummary(unitId, period) {
   const now = new Date();
   const rangeMs = periodToMs(period);
@@ -983,6 +1006,7 @@ async function fetchPacTrendSummary(unitId, period) {
     "TARGET_TEMPERATURE",
     "TEMPERATURE_SET",
   ]);
+  const outdoorDs = findOutdoorTemperatureDataset(datasets);
 
   const pointsMap = new Map();
   for (const p of roomDs?.data || []) {
@@ -1002,9 +1026,20 @@ async function fetchPacTrendSummary(unitId, period) {
       targetTemp: typeof p.y === "number" ? p.y : Number(p.y),
     });
   }
+  for (const p of outdoorDs?.data || []) {
+    const ts = new Date(p.x).getTime();
+    if (Number.isNaN(ts)) continue;
+    const y = typeof p.y === "number" ? p.y : Number(p.y);
+    if (!Number.isFinite(y)) continue;
+    const current = pointsMap.get(ts) || { ts };
+    pointsMap.set(ts, {
+      ...current,
+      outdoorTemp: y,
+    });
+  }
 
   return Array.from(pointsMap.values())
-    .filter((p) => Number.isFinite(p.indoorTemp) || Number.isFinite(p.targetTemp))
+    .filter((p) => Number.isFinite(p.indoorTemp) || Number.isFinite(p.targetTemp) || Number.isFinite(p.outdoorTemp))
     .sort((a, b) => a.ts - b.ts);
 }
 
