@@ -739,7 +739,7 @@ async function refreshDevice() {
 
 async function fetchWeatherCurrent() {
   const s = await fetch(
-    "https://api.open-meteo.com/v1/forecast?latitude=45.1314&longitude=5.8352&current=temperature_2m&models=meteofrance_seamless",
+    "https://api.open-meteo.com/v1/forecast?latitude=45.0773044&longitude=5.8421642&current=temperature_2m&models=meteofrance_seamless",
   ).then((r) => r.json());
   const c = await fetch(
     "https://api.open-meteo.com/v1/forecast?latitude=45.1267&longitude=5.8747&current=temperature_2m&models=meteofrance_seamless",
@@ -762,6 +762,85 @@ function getWeatherLabel(weatherCode) {
   if ([71, 73, 75, 77, 85, 86].includes(weatherCode)) return { label: "Neige", icon: "❄️" };
   if ([95, 96, 99].includes(weatherCode)) return { label: "Orage", icon: "⛈️" };
   return { label: "Variable", icon: "🌤️" };
+}
+
+function dominantWeatherCode(codes = []) {
+  const counts = new Map();
+  for (const c of codes) {
+    if (!Number.isFinite(Number(c))) continue;
+    const key = Number(c);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  let best = null;
+  let bestCount = -1;
+  for (const [k, v] of counts.entries()) {
+    if (v > bestCount) {
+      best = k;
+      bestCount = v;
+    }
+  }
+  return best;
+}
+
+async function fetchDayPartsFor(latitude, longitude, days = 4) {
+  const url =
+    "https://api.open-meteo.com/v1/forecast" +
+    `?latitude=${latitude}&longitude=${longitude}` +
+    `&forecast_days=${days}` +
+    "&hourly=temperature_2m,precipitation,snowfall,weather_code" +
+    "&models=meteofrance_seamless" +
+    "&timezone=auto";
+  const data = await fetch(url).then((r) => r.json());
+  const times = data?.hourly?.time || [];
+  const temps = data?.hourly?.temperature_2m || [];
+  const precs = data?.hourly?.precipitation || [];
+  const snows = data?.hourly?.snowfall || [];
+  const codes = data?.hourly?.weather_code || [];
+
+  const rows = times.map((t, idx) => ({
+    dt: new Date(t),
+    temp: temps[idx] ?? null,
+    precipitation: precs[idx] ?? 0,
+    snowfall: snows[idx] ?? 0,
+    weatherCode: codes[idx] ?? null,
+  }));
+
+  function summarize(bucket) {
+    const tVals = bucket.map((x) => Number(x.temp)).filter((v) => Number.isFinite(v));
+    const precipitationMm = bucket.reduce((a, x) => a + Number(x.precipitation || 0), 0);
+    const snowfallCm = bucket.reduce((a, x) => a + Number(x.snowfall || 0), 0);
+    const code = dominantWeatherCode(bucket.map((x) => x.weatherCode));
+    const visual = getWeatherLabel(code);
+    return {
+      tempMin: tVals.length ? Math.min(...tVals) : null,
+      tempMax: tVals.length ? Math.max(...tVals) : null,
+      precipitationMm: Math.round(precipitationMm * 10) / 10,
+      snowfallCm: Math.round(snowfallCm * 10) / 10,
+      weatherCode: code,
+      weatherLabel: visual.label,
+      weatherIcon: visual.icon,
+    };
+  }
+
+  function partsForDate(dateStr) {
+    const forDay = rows.filter((r) => r.dt.toISOString().slice(0, 10) === dateStr);
+    const morning = forDay.filter((r) => r.dt.getHours() >= 6 && r.dt.getHours() < 12);
+    const afternoon = forDay.filter((r) => r.dt.getHours() >= 12 && r.dt.getHours() < 18);
+    const evening = forDay.filter((r) => r.dt.getHours() >= 18 && r.dt.getHours() < 24);
+    return {
+      morning: summarize(morning),
+      afternoon: summarize(afternoon),
+      evening: summarize(evening),
+    };
+  }
+
+  const today = new Date();
+  const outByDate = {};
+  for (let i = 0; i < Math.max(1, days); i += 1) {
+    const dateStr = new Date(today.getTime() + i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    outByDate[dateStr] = partsForDate(dateStr);
+  }
+  return outByDate;
 }
 
 async function fetchForecastFor(latitude, longitude, days) {
@@ -792,15 +871,27 @@ async function fetchForecastFor(latitude, longitude, days) {
 async function fetchForecast(horizonDays) {
   const now = Date.now();
   const cached = state.forecastCache.byHorizon[horizonDays];
-  if (cached && now - cached.updatedAt < 15 * 60 * 1000) {
+  const cachedPartsKeys = cached?.data?.parts?.sechilienne ? Object.keys(cached.data.parts.sechilienne) : [];
+  const cachedLooksLegacy = cachedPartsKeys.includes("today") || cachedPartsKeys.includes("tomorrow");
+  if (cached && !cachedLooksLegacy && now - cached.updatedAt < 15 * 60 * 1000) {
     return cached.data;
   }
 
-  const [sechilienne, chamrousse] = await Promise.all([
-    fetchForecastFor(45.1314, 5.8352, horizonDays),
+  const [sechilienne, chamrousse, sechParts, chamParts] = await Promise.all([
+    fetchForecastFor(45.0773044, 5.8421642, horizonDays),
     fetchForecastFor(45.1267, 5.8747, horizonDays),
+    fetchDayPartsFor(45.0773044, 5.8421642, horizonDays),
+    fetchDayPartsFor(45.1267, 5.8747, horizonDays),
   ]);
-  const data = { horizonDays, sechilienne, chamrousse };
+  const data = {
+    horizonDays,
+    sechilienne,
+    chamrousse,
+    parts: {
+      sechilienne: sechParts,
+      chamrousse: chamParts,
+    },
+  };
   state.forecastCache.byHorizon[horizonDays] = { updatedAt: now, data };
   return data;
 }
@@ -829,7 +920,7 @@ async function fetchWeatherHistory(period) {
     }));
   }
 
-  const [s, c] = await Promise.all([onePlace(45.1314, 5.8352), onePlace(45.1267, 5.8747)]);
+  const [s, c] = await Promise.all([onePlace(45.0773044, 5.8421642), onePlace(45.1267, 5.8747)]);
   const byTs = new Map();
   for (const p of s) {
     if (p.ts < start.getTime()) continue;
@@ -1069,7 +1160,17 @@ app.post("/api/device/control", async (req, res) => {
     // Accepte les clés "UI" et les convertit en format MELCloud.
     const payload = {};
     if (Object.prototype.hasOwnProperty.call(body, "power")) payload.Power = !!body.power;
-    if (Object.prototype.hasOwnProperty.call(body, "operationMode")) payload.OperationMode = String(body.operationMode || "AUTO");
+    if (Object.prototype.hasOwnProperty.call(body, "operationMode")) {
+      const raw = String(body.operationMode || "AUTO").toUpperCase();
+      const modeMap = {
+        AUTO: "Automatic",
+        HEAT: "Heat",
+        COOL: "Cool",
+        DRY: "Dry",
+        FAN: "Fan",
+      };
+      payload.OperationMode = modeMap[raw] || String(body.operationMode);
+    }
     if (Object.prototype.hasOwnProperty.call(body, "setTemperature")) payload.SetTemperature = Number(body.setTemperature);
     if (Object.prototype.hasOwnProperty.call(body, "setFanSpeed")) {
       const raw = String(body.setFanSpeed || "AUTO").toUpperCase();
@@ -1081,7 +1182,8 @@ app.post("/api/device/control", async (req, res) => {
 
     await melcloudApi(`/monitor/ataunit/${encodeURIComponent(state.device.id)}`, "PUT", finalPayload);
     await refreshDevice();
-    res.json({ ok: true });
+    // Return the updated device so the UI can avoid reloading all endpoints.
+    res.json({ ok: true, device: state.device });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1135,7 +1237,7 @@ app.get("/api/pac/wifi-history", async (req, res) => {
 app.get("/api/weather/forecast", async (req, res) => {
   try {
     const horizon = Number(req.query.horizon || 1);
-    const safeHorizon = [1, 3, 15].includes(horizon) ? horizon : 1;
+    const safeHorizon = [1, 3, 4, 15].includes(horizon) ? horizon : 1;
     const data = await fetchForecast(safeHorizon);
     res.json(data);
   } catch (e) {

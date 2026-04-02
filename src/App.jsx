@@ -1,11 +1,83 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Box, Button, Card, CardContent, Container, FormControl, Grid, InputLabel, LinearProgress, MenuItem, Select, Slider, Stack, Switch, Tab, Tabs, TextField, Typography } from "@mui/material";
-import { CartesianGrid, Legend, Line, LineChart, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import AcUnit from "@mui/icons-material/AcUnit";
+import Air from "@mui/icons-material/Air";
+import Dehaze from "@mui/icons-material/Dehaze";
+import Lightbulb from "@mui/icons-material/Lightbulb";
+import PowerSettingsNew from "@mui/icons-material/PowerSettingsNew";
+import WbSunny from "@mui/icons-material/WbSunny";
+import { Alert, Box, Button, Card, CardContent, Container, FormControl, Grid, InputLabel, LinearProgress, ListItemIcon, MenuItem, Select, Slider, Stack, Switch, Tab, Tabs, TextField, Typography } from "@mui/material";
+import { Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-const modeOptions = ["HEAT", "COOL", "AUTO", "DRY", "FAN"];
-const fanOptions = ["AUTO", "QUIET", "0", "1", "2", "3", "4", "5"];
-const modeLabels = { HEAT: "Chauffage", COOL: "Refroidissement", AUTO: "Auto", DRY: "Déshumidification", FAN: "Ventilation" };
-const fanLabels = { AUTO: "Auto", QUIET: "Silencieux", 0: "Auto", 1: "Vitesse 1", 2: "Vitesse 2", 3: "Vitesse 3", 4: "Vitesse 4", 5: "Vitesse 5" };
+const modeOptions = ["Heat", "Cool", "Automatic", "Dry", "Fan"];
+const fanOptions = ["One", "Two", "Three", "Four", "Five"];
+const modeLabels = { Heat: "Chauffage", Cool: "Refroidissement", Automatic: "Automatique", Dry: "Déshumidification", Fan: "Ventilation" };
+const fanLabels = { One: "Vitesse 1", Two: "Vitesse 2", Three: "Vitesse 3", Four: "Vitesse 4", Five: "Vitesse 5" };
+
+/** Avec un axe temps + points PAC très denses, Recharts donne une largeur de barre ~0 : les barres deviennent invisibles. */
+function makePrecipBarShape(minWidthPx) {
+  return function PrecipBarShape(props) {
+    const { fill, x, y, width, height } = props;
+    if (height == null || !Number.isFinite(Number(height)) || Number(height) <= 0) return null;
+    const w0 = Number(width);
+    const w = Math.max(Number.isFinite(w0) ? w0 : 0, minWidthPx);
+    const x0 = Number(x);
+    const xAdj = Number.isFinite(x0) ? x0 + (Number.isFinite(w0) ? (w0 - w) / 2 : 0) : x;
+    return <rect x={xAdj} y={y} width={w} height={height} fill={fill} fillOpacity={0.88} rx={2} ry={2} />;
+  };
+}
+
+const precipBarShape = makePrecipBarShape(7);
+
+function normalizeOperationMode(value) {
+  const raw = String(value || "").trim();
+  const up = raw.toUpperCase();
+  if (up === "AUTO" || up === "AUTOMATIC") return "Automatic";
+  if (up === "HEAT") return "Heat";
+  if (up === "COOL") return "Cool";
+  if (up === "DRY") return "Dry";
+  if (up === "FAN") return "Fan";
+  // MELCloud peut déjà renvoyer "Heat"/"Cool"/etc.
+  if (modeOptions.includes(raw)) return raw;
+  return "Automatic";
+}
+
+function normalizeFanSpeed(value) {
+  const raw = String(value || "").trim();
+  const up = raw.toUpperCase();
+  // L'API peut renvoyer AUTO/QUIET, mais on ne les expose pas dans l'UI : on mappe sur une vitesse valide.
+  if (up === "AUTO" || up === "0") return "One";
+  if (up === "QUIET") return "One";
+  if (up === "ONE" || up === "1") return "One";
+  if (up === "TWO" || up === "2") return "Two";
+  if (up === "THREE" || up === "3") return "Three";
+  if (up === "FOUR" || up === "4") return "Four";
+  if (up === "FIVE" || up === "5") return "Five";
+  if (fanOptions.includes(raw)) return raw;
+  return "One";
+}
+
+function normalizeDeviceFromApi(d) {
+  if (!d) return d;
+  return {
+    ...d,
+    operationMode: normalizeOperationMode(d.operationMode),
+    fanSpeed: normalizeFanSpeed(d.fanSpeed),
+  };
+}
+
+const modeIconComponent = {
+  Heat: WbSunny,
+  Cool: AcUnit,
+  Automatic: Lightbulb,
+  Dry: Dehaze,
+  Fan: Air,
+};
+
+function ModeIcon({ mode, sx }) {
+  const m = normalizeOperationMode(mode);
+  const Icon = modeIconComponent[m] || Lightbulb;
+  return <Icon sx={sx} aria-hidden />;
+}
 const followPeriods = [
   { id: "24h", label: "Dernières 24h" },
   { id: "3d", label: "3 derniers jours" },
@@ -13,12 +85,7 @@ const followPeriods = [
   { id: "30d", label: "Dernier mois" },
   { id: "365d", label: "Dernière année" },
 ];
-const weatherTabs = [
-  { id: "today", label: "Aujourd'hui" },
-  { id: "tomorrow", label: "Demain" },
-  { id: "3d", label: "3 jours" },
-  { id: "weekend", label: "Week-end à venir" },
-];
+const weatherTabs = []; // construit dynamiquement (dates) après fetch forecast
 
 /** En production (Vercel), URL du backend Node (Render, Railway…). En dev, vide = proxy Vite vers /api. */
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
@@ -46,18 +113,21 @@ export default function App() {
   const [wifiHistory, setWifiHistory] = useState([]);
   const [forecast, setForecast] = useState(null);
   const [period, setPeriod] = useState("3d");
-  const [meteoTab, setMeteoTab] = useState("3d");
+  const [meteoTab, setMeteoTab] = useState("");
   const [trackingTab, setTrackingTab] = useState("temperature");
   const [busy, setBusy] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
   const [error, setError] = useState("");
   const weatherScrollRef = useRef(null);
   const nowRef = useRef(Date.now());
+  const pauseGlobalRefreshUntilRef = useRef(0);
 
   useEffect(() => {
     document.title = "Clots de la Charmette";
   }, []);
 
   const refreshData = async () => {
+    if (Date.now() < pauseGlobalRefreshUntilRef.current) return;
     nowRef.current = Date.now();
     const [s, d, h, p, w, wh] = await Promise.allSettled([
       api("/api/session"),
@@ -69,7 +139,7 @@ export default function App() {
     ]);
     if (s.status === "fulfilled") setSession(s.value);
     if (d.status === "fulfilled") {
-      setDevice(d.value);
+      setDevice(normalizeDeviceFromApi(d.value));
     } else if (d.status === "rejected") {
       const msg = String(d.reason?.message || "");
       if (msg.includes("Session MELCloud") || msg.includes("expirée") || msg.includes("Refresh token")) {
@@ -94,7 +164,7 @@ export default function App() {
   }, [period]);
 
   useEffect(() => {
-    api("/api/weather/forecast?horizon=15")
+    api("/api/weather/forecast?horizon=4")
       .then(setForecast)
       .catch((e) => setError(e.message));
   }, []);
@@ -113,11 +183,24 @@ export default function App() {
   };
 
   const updateControl = async (payload) => {
+    // Optimistic UI: apply immediately, then reconcile with backend response.
+    if (device) {
+      setDevice((d) => (d ? normalizeDeviceFromApi({ ...d, ...payload }) : d));
+    }
+    setControlBusy(true);
+    // Évite un refresh global qui tomberait "pile" pendant/après un control.
+    pauseGlobalRefreshUntilRef.current = Date.now() + 8000;
     try {
-      await api("/api/device/control", { method: "POST", body: JSON.stringify(payload) });
-      await refreshData();
+      const out = await api("/api/device/control", { method: "POST", body: JSON.stringify(payload) });
+      if (out?.device) setDevice(normalizeDeviceFromApi(out.device));
+      setError("");
+      // Keep history/graphs on their normal 30s refresh cadence (avoid reloading everything per click).
     } catch (e) {
       setError(e.message);
+      // Best-effort resync of the device only (avoid full refresh).
+      api("/api/device").then((dv) => setDevice(normalizeDeviceFromApi(dv))).catch(() => {});
+    } finally {
+      setControlBusy(false);
     }
   };
 
@@ -140,8 +223,8 @@ export default function App() {
         ...cur,
         sechilienne: p.sechilienneTemp ?? null,
         chamrousse: p.chamrousseTemp ?? null,
-        sechiliennePrecipitation: p.sechiliennePrecipitation ?? null,
-        sechilienneSnowfall: p.sechilienneSnowfall ?? null,
+        sechiliennePrecipitation: Number.isFinite(Number(p.sechiliennePrecipitation)) ? Number(p.sechiliennePrecipitation) : 0,
+        sechilienneSnowfall: Number.isFinite(Number(p.sechilienneSnowfall)) ? Number(p.sechilienneSnowfall) : 0,
         chamroussePrecipitation: p.chamroussePrecipitation ?? null,
         chamrousseSnowfall: p.chamrousseSnowfall ?? null,
       });
@@ -260,29 +343,54 @@ export default function App() {
         {payload.map((p) => (
           <Typography key={p.dataKey} variant="body2" sx={{ color: p.color }}>
             {p.name}: {Number.isFinite(Number(p.value)) ? Number(p.value).toFixed(1) : "--"}
-            {isWifi ? (p.dataKey === "rssi" ? " dBm" : " %") : "°C"}
+            {isWifi ? (p.dataKey === "rssi" ? " dBm" : " %") : p.dataKey?.toLowerCase().includes("precipitation") ? " mm" : p.dataKey?.toLowerCase().includes("snowfall") ? " cm" : "°C"}
           </Typography>
         ))}
         {!isWifi && payload?.[0]?.payload && (
           <Typography variant="caption" sx={{ color: "#cbd5e1", display: "block", mt: 0.5 }}>
-            Pluie/Neige Séchilienne: {payload[0].payload.sechiliennePrecipitation ?? 0} mm / {payload[0].payload.sechilienneSnowfall ?? 0} cm
+            Pluie/Neige La Charmette: {payload[0].payload.sechiliennePrecipitation ?? 0} mm / {payload[0].payload.sechilienneSnowfall ?? 0} cm
           </Typography>
         )}
       </Box>
     );
   };
 
-  const forecastRows = useMemo(() => {
+  const forecastDailyRows = useMemo(() => {
     const s = forecast?.sechilienne || [];
     const c = forecast?.chamrousse || [];
     const rows = s.map((d, i) => ({ date: d.date, sech: d, cham: c[i] }));
-    if (meteoTab === "today") return rows.slice(0, 1);
-    if (meteoTab === "tomorrow") return rows.slice(1, 2);
-    if (meteoTab === "3d") return rows.slice(0, 3);
-    // weekend
-    const idx = rows.findIndex((r, i) => i >= 3 && [0, 6].includes(new Date(r.date).getDay()));
-    return idx >= 0 ? rows.slice(idx, idx + 2) : [];
-  }, [forecast, meteoTab]);
+    return rows.slice(0, 4);
+  }, [forecast]);
+
+  const dayParts = useMemo(() => {
+    const parts = forecast?.parts;
+    if (!parts) return null;
+    return {
+      sech: parts.sechilienne,
+      cham: parts.chamrousse,
+    };
+  }, [forecast]);
+
+  const weatherTabsDynamic = useMemo(() => {
+    const dates = forecastDailyRows.map((r) => r.date).filter(Boolean);
+    return dates.map((d) => ({
+      id: d,
+      label: new Date(d).toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "2-digit" }),
+    }));
+  }, [forecastDailyRows]);
+
+  useEffect(() => {
+    if (!meteoTab && weatherTabsDynamic.length) setMeteoTab(weatherTabsDynamic[0].id);
+  }, [meteoTab, weatherTabsDynamic]);
+
+  const meteoSlots = useMemo(
+    () => [
+      { id: "morning", label: "Matin" },
+      { id: "afternoon", label: "Après-midi" },
+      { id: "evening", label: "Soir" },
+    ],
+    [],
+  );
 
   const isAuthenticated = !!session?.authenticated;
   if (!isAuthenticated) {
@@ -319,35 +427,63 @@ export default function App() {
                   <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.72)" }}>
                     Température actuelle
                   </Typography>
-                  <Stack direction="row" alignItems="baseline" spacing={1}>
-                    <Typography variant="h2" sx={{ fontWeight: 800, lineHeight: 1 }}>
-                      {Number.isFinite(Number(device?.indoorTemp)) ? Number(device.indoorTemp).toFixed(1) : "--"}
-                    </Typography>
-                    <Typography variant="h4" sx={{ opacity: 0.9 }}>
-                      °C
-                    </Typography>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2}>
+                    <Stack direction="row" alignItems="baseline" spacing={1}>
+                      <Typography variant="h2" sx={{ fontWeight: 800, lineHeight: 1 }}>
+                        {Number.isFinite(Number(device?.indoorTemp)) ? Number(device.indoorTemp).toFixed(1) : "--"}
+                      </Typography>
+                      <Typography variant="h4" sx={{ opacity: 0.9 }}>
+                        °C
+                      </Typography>
+                    </Stack>
+                    <Box
+                      component="span"
+                      title={modeLabels[device?.operationMode] || "Mode"}
+                      sx={{ display: "flex", alignItems: "center", color: "rgba(255,255,255,0.92)" }}
+                    >
+                      {device?.power ? (
+                        <ModeIcon mode={device?.operationMode} sx={{ fontSize: 38 }} />
+                      ) : (
+                        <PowerSettingsNew sx={{ fontSize: 38, opacity: 0.72 }} aria-hidden />
+                      )}
+                    </Box>
                   </Stack>
                 </Box>
-                <Stack direction="row" spacing={1} alignItems="center"><Typography>Marche / Arret</Typography><Switch checked={!!device?.power} onChange={(e) => updateControl({ power: e.target.checked })} /></Stack>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography>Marche / Arret</Typography>
+                  <Switch disabled={controlBusy} checked={!!device?.power} onChange={(e) => updateControl({ power: e.target.checked })} />
+                </Stack>
                 <FormControl fullWidth>
                   <InputLabel id="pac-mode-label">Mode</InputLabel>
                   <Select
                     labelId="pac-mode-label"
                     label="Mode"
-                    value={device?.operationMode || "AUTO"}
+                    value={device?.operationMode || "Automatic"}
+                    disabled={controlBusy}
                     onChange={(e) => updateControl({ operationMode: e.target.value })}
                     MenuProps={{ disableScrollLock: true, disablePortal: false }}
                   >
-                    {modeOptions.map((m) => <MenuItem key={m} value={m}>{modeLabels[m]}</MenuItem>)}
+                    {modeOptions.map((m) => (
+                      <MenuItem key={m} value={m}>
+                        <ListItemIcon sx={{ minWidth: 36 }}>
+                          <ModeIcon mode={m} sx={{ fontSize: 22 }} />
+                        </ListItemIcon>
+                        {modeLabels[m]}
+                      </MenuItem>
+                    ))}
                   </Select>
                 </FormControl>
-                <Box><Typography>Temperature cible: {device?.targetTemp ?? "--"}°C</Typography><Slider value={device?.targetTemp ?? 21} min={16} max={31} step={0.5} onChangeCommitted={(_, v) => updateControl({ setTemperature: v })} /></Box>
+                <Box>
+                  <Typography>Temperature cible: {device?.targetTemp ?? "--"}°C</Typography>
+                  <Slider disabled={controlBusy} value={device?.targetTemp ?? 21} min={16} max={31} step={0.5} onChangeCommitted={(_, v) => updateControl({ setTemperature: v })} />
+                </Box>
                 <FormControl fullWidth>
                   <InputLabel id="pac-fan-label">Ventilation</InputLabel>
                   <Select
                     labelId="pac-fan-label"
                     label="Ventilation"
-                    value={device?.fanSpeed || "AUTO"}
+                    value={device?.fanSpeed || "One"}
+                    disabled={controlBusy}
                     onChange={(e) => updateControl({ setFanSpeed: e.target.value })}
                     MenuProps={{ disableScrollLock: true, disablePortal: false }}
                   >
@@ -364,93 +500,88 @@ export default function App() {
               <CardContent sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
               <Typography variant="h6" gutterBottom>Meteo des Clots</Typography>
               <Tabs value={meteoTab} onChange={(_, v) => setMeteoTab(v)} sx={{ mb: 1 }}>
-                {weatherTabs.map((t) => <Tab key={t.id} label={t.label} value={t.id} />)}
+                {weatherTabsDynamic.map((t) => <Tab key={t.id} label={t.label} value={t.id} />)}
               </Tabs>
               <Box sx={{ height: { xs: "auto", md: 330 }, display: "flex", flex: 1, minHeight: 0 }}>
                 <Grid container spacing={1} sx={{ width: "100%", m: 0, alignItems: "stretch" }}>
-                  {forecastRows.map((r) => (
-                    <Grid
-                      key={r.date}
-                      size={{
-                        xs: 12,
-                        md: meteoTab === "3d" ? 4 : meteoTab === "weekend" ? 6 : 12,
-                      }}
-                      sx={{ display: "flex" }}
-                    >
-                      <Card variant="outlined" sx={{ width: "100%", height: "100%" }}>
-                        <CardContent sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
-                          <Typography variant="subtitle2" sx={{ mb: 1, opacity: 0.9 }}>
-                            {new Date(r.date).toLocaleDateString("fr-FR", { weekday: "long", day: "2-digit", month: "2-digit" })}
-                          </Typography>
+                  {dayParts &&
+                    meteoSlots.map((slot) => {
+                      const sech = dayParts.sech?.[meteoTab]?.[slot.id];
+                      const cham = dayParts.cham?.[meteoTab]?.[slot.id];
+                      return (
+                        <Grid key={slot.id} size={{ xs: 12, md: 4 }} sx={{ display: "flex" }}>
+                          <Card variant="outlined" sx={{ width: "100%", height: "100%" }}>
+                            <CardContent sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+                              <Typography variant="subtitle2" sx={{ mb: 1, opacity: 0.9 }}>
+                                {slot.label}
+                              </Typography>
 
-                          <Grid container spacing={1.5} sx={{ flex: 1, alignContent: "flex-start" }}>
-                            <Grid size={{ xs: 12, sm: meteoTab === "3d" || meteoTab === "weekend" ? 12 : 6 }}>
-                              <Box sx={{ p: meteoTab === "3d" || meteoTab === "weekend" ? 1 : 1.25, borderRadius: 2, bgcolor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
-                                <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-                                  <Typography variant="body2" sx={{ fontWeight: 700 }}>🏘️ Séchilienne</Typography>
-                                  <Typography variant="body2" sx={{ opacity: 0.9 }}>{r.sech?.weatherIcon} {r.sech?.weatherLabel}</Typography>
-                                </Stack>
+                              <Grid container spacing={1.5} sx={{ flex: 1, alignContent: "flex-start" }}>
+                                <Grid size={{ xs: 12 }}>
+                                  <Box sx={{ p: 1, borderRadius: 2, bgcolor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                                    <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+                                      <Typography variant="body2" sx={{ fontWeight: 700 }}>🏠 La Charmette</Typography>
+                                      <Typography variant="body2" sx={{ opacity: 0.9, display: "flex", alignItems: "center", gap: 0.75 }}>
+                                        <Box component="span" sx={{ fontSize: 34, lineHeight: 1 }}>{sech?.weatherIcon}</Box>
+                                        <Box component="span">{sech?.weatherLabel}</Box>
+                                      </Typography>
+                                    </Stack>
+                                    <Stack direction="row" alignItems="baseline" spacing={1} sx={{ mt: 1 }}>
+                                      <Typography variant="h4" sx={{ lineHeight: 1, fontWeight: 800 }}>
+                                        {Number.isFinite(sech?.tempMax) ? Math.round(sech.tempMax) : "--"}°
+                                      </Typography>
+                                      <Typography variant="subtitle1" sx={{ opacity: 0.9 }}>
+                                        {Number.isFinite(sech?.tempMin) ? Math.round(sech.tempMin) : "--"}°
+                                      </Typography>
+                                    </Stack>
+                                    <Stack direction="row" spacing={2} sx={{ mt: 1 }}>
+                                      <Typography variant="body2" sx={{ opacity: 0.9 }}>
+                                        Pluie: <b>{Number.isFinite(sech?.precipitationMm) ? Math.round(sech.precipitationMm) : 0}</b> mm
+                                      </Typography>
+                                      <Typography variant="body2" sx={{ opacity: 0.9 }}>
+                                        Neige: <b>{Number.isFinite(sech?.snowfallCm) ? Math.round(sech.snowfallCm) : 0}</b> cm
+                                      </Typography>
+                                    </Stack>
+                                  </Box>
+                                </Grid>
 
-                                <Stack direction="row" alignItems="baseline" spacing={1} sx={{ mt: 1 }}>
-                                  <Typography variant={meteoTab === "3d" || meteoTab === "weekend" ? "h4" : "h3"} sx={{ lineHeight: 1, fontWeight: 800 }}>
-                                    {Number.isFinite(r.sech?.tempMax) ? Math.round(r.sech.tempMax) : "--"}°
-                                  </Typography>
-                                  <Typography variant={meteoTab === "3d" || meteoTab === "weekend" ? "subtitle1" : "h6"} sx={{ opacity: 0.9 }}>
-                                    {Number.isFinite(r.sech?.tempMin) ? Math.round(r.sech.tempMin) : "--"}°
-                                  </Typography>
-                                  {!(meteoTab === "3d" || meteoTab === "weekend") && (
-                                    <Typography variant="caption" sx={{ opacity: 0.7 }}>max / min</Typography>
-                                  )}
-                                </Stack>
-
-                                <Stack direction="row" spacing={2} sx={{ mt: 1 }}>
-                                  <Typography variant="body2" sx={{ opacity: 0.9 }}>
-                                    Pluie: <b>{Number.isFinite(r.sech?.precipitationMm) ? Math.round(r.sech.precipitationMm) : 0}</b> mm
-                                  </Typography>
-                                  <Typography variant="body2" sx={{ opacity: 0.9 }}>
-                                    Neige: <b>{Number.isFinite(r.sech?.snowfallCm) ? Math.round(r.sech.snowfallCm) : 0}</b> cm
-                                  </Typography>
-                                </Stack>
-                              </Box>
-                            </Grid>
-
-                            <Grid size={{ xs: 12, sm: meteoTab === "3d" || meteoTab === "weekend" ? 12 : 6 }}>
-                              <Box sx={{ p: meteoTab === "3d" || meteoTab === "weekend" ? 1 : 1.25, borderRadius: 2, bgcolor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
-                                <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-                                  <Typography variant="body2" sx={{ fontWeight: 700 }}>🏔️ Chamrousse</Typography>
-                                  <Typography variant="body2" sx={{ opacity: 0.9 }}>{r.cham?.weatherIcon} {r.cham?.weatherLabel}</Typography>
-                                </Stack>
-
-                                <Stack direction="row" alignItems="baseline" spacing={1} sx={{ mt: 1 }}>
-                                  <Typography variant={meteoTab === "3d" || meteoTab === "weekend" ? "h4" : "h3"} sx={{ lineHeight: 1, fontWeight: 800 }}>
-                                    {Number.isFinite(r.cham?.tempMax) ? Math.round(r.cham.tempMax) : "--"}°
-                                  </Typography>
-                                  <Typography variant={meteoTab === "3d" || meteoTab === "weekend" ? "subtitle1" : "h6"} sx={{ opacity: 0.9 }}>
-                                    {Number.isFinite(r.cham?.tempMin) ? Math.round(r.cham.tempMin) : "--"}°
-                                  </Typography>
-                                  {!(meteoTab === "3d" || meteoTab === "weekend") && (
-                                    <Typography variant="caption" sx={{ opacity: 0.7 }}>max / min</Typography>
-                                  )}
-                                </Stack>
-
-                                <Stack direction="row" spacing={2} sx={{ mt: 1 }}>
-                                  <Typography variant="body2" sx={{ opacity: 0.9 }}>
-                                    Pluie: <b>{Number.isFinite(r.cham?.precipitationMm) ? Math.round(r.cham.precipitationMm) : 0}</b> mm
-                                  </Typography>
-                                  <Typography variant="body2" sx={{ opacity: 0.9 }}>
-                                    Neige: <b>{Number.isFinite(r.cham?.snowfallCm) ? Math.round(r.cham.snowfallCm) : 0}</b> cm
-                                  </Typography>
-                                </Stack>
-                              </Box>
-                            </Grid>
-                          </Grid>
-                        </CardContent>
-                      </Card>
-                    </Grid>
-                  ))}
+                                <Grid size={{ xs: 12 }}>
+                                  <Box sx={{ p: 1, borderRadius: 2, bgcolor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                                    <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+                                      <Typography variant="body2" sx={{ fontWeight: 700 }}>🏔️ Chamrousse</Typography>
+                                      <Typography variant="body2" sx={{ opacity: 0.9, display: "flex", alignItems: "center", gap: 0.75 }}>
+                                        <Box component="span" sx={{ fontSize: 34, lineHeight: 1 }}>{cham?.weatherIcon}</Box>
+                                        <Box component="span">{cham?.weatherLabel}</Box>
+                                      </Typography>
+                                    </Stack>
+                                    <Stack direction="row" alignItems="baseline" spacing={1} sx={{ mt: 1 }}>
+                                      <Typography variant="h4" sx={{ lineHeight: 1, fontWeight: 800 }}>
+                                        {Number.isFinite(cham?.tempMax) ? Math.round(cham.tempMax) : "--"}°
+                                      </Typography>
+                                      <Typography variant="subtitle1" sx={{ opacity: 0.9 }}>
+                                        {Number.isFinite(cham?.tempMin) ? Math.round(cham.tempMin) : "--"}°
+                                      </Typography>
+                                    </Stack>
+                                    <Stack direction="row" spacing={2} sx={{ mt: 1 }}>
+                                      <Typography variant="body2" sx={{ opacity: 0.9 }}>
+                                        Pluie: <b>{Number.isFinite(cham?.precipitationMm) ? Math.round(cham.precipitationMm) : 0}</b> mm
+                                      </Typography>
+                                      <Typography variant="body2" sx={{ opacity: 0.9 }}>
+                                        Neige: <b>{Number.isFinite(cham?.snowfallCm) ? Math.round(cham.snowfallCm) : 0}</b> cm
+                                      </Typography>
+                                    </Stack>
+                                  </Box>
+                                </Grid>
+                              </Grid>
+                            </CardContent>
+                          </Card>
+                        </Grid>
+                      );
+                    })}
                 </Grid>
               </Box>
-            </CardContent></Card>
+              </CardContent>
+            </Card>
           </Grid>
 
           <Grid size={{ xs: 12 }}>
@@ -466,10 +597,18 @@ export default function App() {
               <Box sx={{ width: "100%", minHeight: 330, height: 330 }}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={320} minHeight={240}>
                   {trackingTab === "temperature" ? (
-                    <LineChart data={tempData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>
+                    <ComposedChart data={tempData} margin={{ top: 10, right: 18, left: 0, bottom: 6 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="ts" type="number" domain={periodDomain} {...axis} tickFormatter={xScaleConfig.tickFormatter} tickCount={xScaleConfig.ticks} interval="preserveStartEnd" />
-                      <YAxis domain={tempYDomain} {...axis} />
+                      <YAxis yAxisId="temp" domain={tempYDomain} {...axis} />
+                      <YAxis
+                        yAxisId="precip"
+                        orientation="right"
+                        domain={[0, (max) => Math.ceil((Number(max) || 0) + 1)]}
+                        tick={{ fill: "rgba(255,255,255,0.72)", fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={{ stroke: "rgba(255,255,255,0.25)" }}
+                      />
                       <Tooltip content={renderCleanTooltip(false)} />
                       <Legend />
                       {pacOnRanges.map((r) => (
@@ -483,11 +622,30 @@ export default function App() {
                           ifOverflow="extendDomain"
                         />
                       ))}
-                      <Line name="Temperature reelle PAC" type="monotone" dataKey="interieure" stroke="#2ed4bf" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line name="Consigne PAC" type="monotone" dataKey="consigne" stroke="#f59e0b" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line name="Exterieure Sechilienne" type="monotone" dataKey="sechilienne" stroke="#60a5fa" strokeWidth={lineWidth} dot={false} connectNulls />
-                      <Line name="Exterieure Chamrousse" type="monotone" dataKey="chamrousse" stroke="#c084fc" strokeWidth={lineWidth} dot={false} connectNulls />
-                    </LineChart>
+                      <Bar
+                        name="Pluie (La Charmette)"
+                        dataKey="sechiliennePrecipitation"
+                        yAxisId="precip"
+                        stackId="precipLaCharmette"
+                        fill="rgba(96,165,250,0.85)"
+                        shape={precipBarShape}
+                        isAnimationActive={false}
+                      />
+                      <Bar
+                        name="Neige (La Charmette)"
+                        dataKey="sechilienneSnowfall"
+                        yAxisId="precip"
+                        stackId="precipLaCharmette"
+                        fill="rgba(226,232,240,0.80)"
+                        shape={precipBarShape}
+                        isAnimationActive={false}
+                      />
+
+                      <Line yAxisId="temp" name="Température réelle PAC" type="monotone" dataKey="interieure" stroke="#2ed4bf" strokeWidth={lineWidth} dot={false} connectNulls />
+                      <Line yAxisId="temp" name="Consigne PAC" type="monotone" dataKey="consigne" stroke="#f59e0b" strokeWidth={lineWidth} dot={false} connectNulls />
+                      <Line yAxisId="temp" name="Extérieure La Charmette" type="monotone" dataKey="sechilienne" stroke="#60a5fa" strokeWidth={lineWidth} dot={false} connectNulls />
+                      <Line yAxisId="temp" name="Extérieure Chamrousse" type="monotone" dataKey="chamrousse" stroke="#c084fc" strokeWidth={lineWidth} dot={false} connectNulls />
+                    </ComposedChart>
                   ) : (
                     <LineChart data={wifiData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>
                       <CartesianGrid strokeDasharray="3 3" />

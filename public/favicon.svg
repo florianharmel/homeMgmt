@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="sky" x1="256" y1="0" x2="256" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0e7490"/>
+      <stop offset="0.45" stop-color="#0c4a6e"/>
+      <stop offset="1" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="peakSnow" x1="256" y1="80" x2="256" y2="280" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="0.5" stop-color="#e2e8f0"/>
+      <stop offset="1" stop-color="#94a3b8"/>
+    </linearGradient>
+    <linearGradient id="rock" x1="256" y1="200" x2="256" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#334155"/>
+      <stop offset="1" stop-color="#1e293b"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#sky)"/>
+  <g fill="#e0f2fe" opacity="0.85">
+    <circle cx="96" cy="72" r="4"/>
+    <circle cx="152" cy="48" r="2.5"/>
+    <circle cx="400" cy="88" r="3"/>
+    <circle cx="360" cy="56" r="2"/>
+    <circle cx="420" cy="120" r="2.5"/>
+  </g>
+  <path fill="#164e63" opacity="0.9" d="M0 512V320l88-100 72 60 96-140 80 72 104-120 72 88V512H0z"/>
+  <path fill="url(#rock)" d="M0 512V360l120-160 80 56 56-88 108 76 148-120V512H0z"/>
+  <path fill="url(#peakSnow)" d="M256 152l-56 72 36 24 20-28 20 32 40-28 44 56 16-40-120-88z"/>
+  <path fill="#f8fafc" opacity="0.95" d="M256 152l38 48-22 16-16-20-32 40-8-6 40-78z"/>
+  <path fill="#cbd5e1" d="M120 200l32-40 24 32-28 20-28-12z"/>
+  <path fill="#ffffff" opacity="0.35" d="M268 168l12 8-8 14-10-10 6-12z"/>
+</svg>
