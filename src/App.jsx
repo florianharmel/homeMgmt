@@ -362,8 +362,10 @@ export default function App() {
 
     const hasAnyPacOn = rows.some((r) => typeof r.pacOn === "boolean");
     if (!hasAnyPacOn) {
-      // Fallback: if we don't have historical ON/OFF yet, tint based on current device state.
-      return device?.power ? [{ x1: start, x2: end }] : [];
+      // Sans historique fiable, ne pas peindre toute la fenêtre : petite bande à droite si la PAC est marquée marche.
+      if (!device?.power) return [];
+      const windowMs = 20 * 60 * 1000;
+      return [{ x1: Math.max(start, end - windowMs), x2: end }];
     }
 
     const ranges = [];
@@ -374,7 +376,8 @@ export default function App() {
       if (typeof r.pacOn !== "boolean") continue;
       if (lastState === null) {
         lastState = r.pacOn;
-        if (lastState) rangeStart = start;
+        // Ne pas étendre jusqu’au début de la période : la plage commence au premier instant où l’état est connu.
+        if (lastState) rangeStart = r.ts;
         continue;
       }
       if (r.pacOn === lastState) continue;

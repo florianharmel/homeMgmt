@@ -671,6 +671,22 @@ async function loginWithCredentials(email, password) {
   saveAuthState();
 }
 
+function readPowerFromMonitor(monitor) {
+  if (!monitor || typeof monitor !== "object") return null;
+  const keys = ["Power", "power", "IsPowerOn", "isPowerOn", "IsOn", "isOn"];
+  for (const k of keys) {
+    if (!Object.prototype.hasOwnProperty.call(monitor, k)) continue;
+    const v = monitor[k];
+    if (typeof v === "boolean") return v;
+    if (v === 1 || v === "1") return true;
+    if (v === 0 || v === "0") return false;
+    const s = String(v).toLowerCase();
+    if (s === "true") return true;
+    if (s === "false") return false;
+  }
+  return null;
+}
+
 async function refreshDevice() {
   const context = await melcloudApi("/context");
   const units = (context?.buildings || []).flatMap((b) => b.airToAirUnits || []);
@@ -703,7 +719,8 @@ async function refreshDevice() {
   ]);
   const targetTemp =
     deepFindNumber(merged, ["settemperature", "targettemperature", "desiredtemperature"]) ?? 21;
-  const power = deepFindBool(merged, ["power", "ispoweron", "ison"]) ?? false;
+  // Priorité au moniteur unitaire : deepFind sur tout l’arbre peut prendre un champ « power » non pertinent.
+  const power = readPowerFromMonitor(monitor) ?? deepFindBool(merged, ["power", "ispoweron", "ison"]) ?? false;
   const operationMode = deepFindString(merged, ["operationmode", "mode"]) ?? "AUTO";
   let fanSpeed = deepFindString(merged, ["fanspeed", "setfanspeed"]) ?? "AUTO";
   if (fanSpeed === "0") fanSpeed = "AUTO";
