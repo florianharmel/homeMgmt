@@ -727,6 +727,7 @@ async function refreshDevice() {
       ts: now,
       indoorTemp: state.device.indoorTemp,
       targetTemp: state.device.targetTemp,
+      power: state.device.power,
       sechilienneTemp: weather.sechilienneTemp,
       chamrousseTemp: weather.chamrousseTemp,
       isConnected: state.device.isConnected,
@@ -1063,8 +1064,22 @@ app.get("/api/debug/probe-history-endpoints", async (req, res) => {
 app.post("/api/device/control", async (req, res) => {
   try {
     if (!state.device?.id) throw new Error("Aucun device sélectionné");
-    const body = req.body;
-    await melcloudApi(`/monitor/ataunit/${encodeURIComponent(state.device.id)}`, "PUT", body);
+    const body = req.body || {};
+
+    // Accepte les clés "UI" et les convertit en format MELCloud.
+    const payload = {};
+    if (Object.prototype.hasOwnProperty.call(body, "power")) payload.Power = !!body.power;
+    if (Object.prototype.hasOwnProperty.call(body, "operationMode")) payload.OperationMode = String(body.operationMode || "AUTO");
+    if (Object.prototype.hasOwnProperty.call(body, "setTemperature")) payload.SetTemperature = Number(body.setTemperature);
+    if (Object.prototype.hasOwnProperty.call(body, "setFanSpeed")) {
+      const raw = String(body.setFanSpeed || "AUTO").toUpperCase();
+      payload.SetFanSpeed = raw === "AUTO" ? "0" : raw;
+    }
+
+    // Si le client envoie déjà le format MELCloud, on le passe tel quel.
+    const finalPayload = Object.keys(payload).length ? payload : body;
+
+    await melcloudApi(`/monitor/ataunit/${encodeURIComponent(state.device.id)}`, "PUT", finalPayload);
     await refreshDevice();
     res.json({ ok: true });
   } catch (e) {
