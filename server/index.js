@@ -1208,7 +1208,8 @@ app.post("/api/device/control", async (req, res) => {
     }
     if (Object.prototype.hasOwnProperty.call(body, "setTemperature")) payload.SetTemperature = Number(body.setTemperature);
     if (Object.prototype.hasOwnProperty.call(body, "setFanSpeed")) {
-      const raw = String(body.setFanSpeed || "AUTO").toUpperCase();
+      // UI : « Auto » → envoi AUTO côté logique (MELCloud attend 0 pour le mode auto).
+      const raw = String(body.setFanSpeed || "One").trim().toUpperCase();
       payload.SetFanSpeed = raw === "AUTO" ? "0" : raw;
     }
 

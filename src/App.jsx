@@ -9,9 +9,9 @@ import { Alert, Box, Button, Card, CardContent, Container, FormControl, Grid, In
 import { Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 const modeOptions = ["Heat", "Cool", "Automatic", "Dry", "Fan"];
-const fanOptions = ["One", "Two", "Three", "Four", "Five"];
+const fanOptions = ["Auto", "One", "Two", "Three", "Four", "Five"];
 const modeLabels = { Heat: "Chauffage", Cool: "Refroidissement", Automatic: "Automatique", Dry: "Déshumidification", Fan: "Ventilation" };
-const fanLabels = { One: "Vitesse 1", Two: "Vitesse 2", Three: "Vitesse 3", Four: "Vitesse 4", Five: "Vitesse 5" };
+const fanLabels = { Auto: "Auto", One: "Vitesse 1", Two: "Vitesse 2", Three: "Vitesse 3", Four: "Vitesse 4", Five: "Vitesse 5" };
 
 /** Avec un axe temps + points PAC très denses, Recharts donne une largeur de barre ~0 : les barres deviennent invisibles. */
 function makePrecipBarShape(minWidthPx) {
@@ -44,9 +44,9 @@ function normalizeOperationMode(value) {
 function normalizeFanSpeed(value) {
   const raw = String(value || "").trim();
   const up = raw.toUpperCase();
-  // L'API peut renvoyer AUTO/QUIET, mais on ne les expose pas dans l'UI : on mappe sur une vitesse valide.
-  if (up === "AUTO" || up === "0") return "One";
-  if (up === "QUIET") return "One";
+  // API MELCloud : AUTO / 0 → mode automatique ; l'UI utilise la valeur « Auto » (envoyée au back puis mappée en AUTO).
+  if (up === "AUTO" || up === "0") return "Auto";
+  if (up === "QUIET") return "Auto";
   if (up === "ONE" || up === "1") return "One";
   if (up === "TWO" || up === "2") return "Two";
   if (up === "THREE" || up === "3") return "Three";
@@ -710,6 +710,20 @@ export default function App() {
                 <ResponsiveContainer width="100%" height="100%" minWidth={320} minHeight={240}>
                   {trackingTab === "temperature" ? (
                     <ComposedChart data={tempData} margin={{ top: 10, right: 18, left: 0, bottom: 6 }}>
+                      {/* Fond plus clair sur toute la hauteur du tracé quand la PAC est allumée (sous grille + courbes) */}
+                      {pacOnRanges.map((r) => (
+                        <ReferenceArea
+                          key={`pac-on-${Math.round(r.x1)}-${Math.round(r.x2)}`}
+                          yAxisId="temp"
+                          x1={r.x1}
+                          x2={r.x2}
+                          y1={tempYDomain[0]}
+                          y2={tempYDomain[1]}
+                          fill="rgba(255,255,255,0.11)"
+                          strokeOpacity={0}
+                          ifOverflow="extendDomain"
+                        />
+                      ))}
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="ts" type="number" domain={periodDomain} {...axis} tickFormatter={xScaleConfig.tickFormatter} tickCount={xScaleConfig.ticks} interval="preserveStartEnd" />
                       <YAxis yAxisId="temp" domain={tempYDomain} {...axis} />
@@ -723,17 +737,6 @@ export default function App() {
                       />
                       <Tooltip content={renderCleanTooltip(false)} />
                       <Legend content={<TemperatureSplitLegend />} wrapperStyle={{ width: "100%" }} />
-                      {pacOnRanges.map((r) => (
-                        <ReferenceArea
-                          key={`${Math.round(r.x1)}-${Math.round(r.x2)}`}
-                          x1={r.x1}
-                          x2={r.x2}
-                          y1={tempYDomain[0]}
-                          y2={tempYDomain[1]}
-                          fill="rgba(34,197,94,0.10)"
-                          ifOverflow="extendDomain"
-                        />
-                      ))}
                       <Bar
                         name="Pluie (La Charmette)"
                         dataKey="sechiliennePrecipitation"
