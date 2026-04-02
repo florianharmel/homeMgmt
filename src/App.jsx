@@ -545,17 +545,21 @@ export default function App() {
                       )}
                     </Box>
                   </Stack>
-                  <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.72)", display: "block", mt: 1.5 }}>
-                    Extérieure (sonde PAC)
-                  </Typography>
-                  <Stack direction="row" alignItems="baseline" spacing={1}>
-                    <Typography variant="h5" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
-                      {Number.isFinite(Number(device?.outdoorTemp)) ? Number(device.outdoorTemp).toFixed(1) : "--"}
-                    </Typography>
-                    <Typography variant="body1" sx={{ opacity: 0.85 }}>
-                      °C
-                    </Typography>
-                  </Stack>
+                  {Number.isFinite(Number(device?.outdoorTemp)) && (
+                    <Box sx={{ mt: 1.5 }}>
+                      <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.72)", display: "block" }}>
+                        Extérieure (sonde PAC)
+                      </Typography>
+                      <Stack direction="row" alignItems="baseline" spacing={1}>
+                        <Typography variant="h5" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
+                          {Number(device.outdoorTemp).toFixed(1)}
+                        </Typography>
+                        <Typography variant="body1" sx={{ opacity: 0.85 }}>
+                          °C
+                        </Typography>
+                      </Stack>
+                    </Box>
+                  )}
                 </Box>
                 <Stack direction="row" spacing={1} alignItems="center">
                   <Typography>Marche / Arret</Typography>
