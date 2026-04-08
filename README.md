@@ -2,6 +2,8 @@
 
 Application full-stack en 1 page pour piloter une PAC Mitsubishi via MELCloud Home, sans Homebridge.
 
+Pour une **vue d’ensemble détaillée** (services, API, variables d’environnement, persistance, checklist pour repartir sur une base propre), voir **[docs/GUIDE-APPLICATION.md](docs/GUIDE-APPLICATION.md)**.
+
 ## Fonctionnalités
 
 - Authentification MELCloud par email/mot de passe.
