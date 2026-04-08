@@ -49,8 +49,8 @@ function makePrecipBarShape(minWidthPx) {
 
 const precipBarShape = makePrecipBarShape(7);
 
-const TRACK_LINE_ANIM = { isAnimationActive: true, animationDuration: 420, animationEasing: "ease-out" };
-const TRACK_BAR_ANIM = { isAnimationActive: true, animationDuration: 380, animationEasing: "ease-out" };
+const TRACK_LINE_ANIM = { isAnimationActive: true, animationDuration: 560, animationEasing: "ease-in-out" };
+const TRACK_BAR_ANIM = { isAnimationActive: true, animationDuration: 500, animationEasing: "ease-in-out" };
 
 function normalizeOperationMode(value) {
   const raw = String(value || "").trim();
@@ -105,7 +105,7 @@ function ModeIcon({ mode, sx }) {
 
 const LEGEND_WEATHER = new Set(["Pluie (La Charmette)", "Neige (La Charmette)", "Extérieure La Charmette", "Extérieure Chamrousse"]);
 const WEATHER_LEGEND_ORDER = ["Pluie (La Charmette)", "Neige (La Charmette)", "Extérieure La Charmette", "Extérieure Chamrousse"];
-const PAC_LEGEND_ORDER = ["Température intérieure", "Consigne PAC", "Extérieure"];
+const SENSOR_LEGEND_ORDER = ["Température intérieure", "Consigne PAC", "Extérieure"];
 const SWITCHBOT_COLOR_POOL = ["#f472b6", "#34d399", "#f87171", "#a78bfa", "#fb7185", "#22d3ee", "#facc15", "#4ade80"];
 
 /** Libellés Recharts `name` → clé `chartSeriesVisible`. */
@@ -150,11 +150,11 @@ function TemperatureSplitLegend(props) {
     payload.filter((e) => LEGEND_WEATHER.has(e.value)),
     WEATHER_LEGEND_ORDER,
   );
-  const pac = sortLegendByOrder(
+  const sensors = sortLegendByOrder(
     payload.filter((e) => !LEGEND_WEATHER.has(e.value) && !isSwitchbotEntry(e)),
-    PAC_LEGEND_ORDER,
+    SENSOR_LEGEND_ORDER,
   );
-  const switchbot = payload.filter((e) => isSwitchbotEntry(e));
+  const switchbot = sortLegendByOrder(payload.filter((e) => isSwitchbotEntry(e)), []);
   const renderEntry = (entry) => {
     const c = entry.color;
     const isBar = entry.type === "rect" || entry.type === "square";
@@ -235,7 +235,7 @@ function TemperatureSplitLegend(props) {
           </Box>
           <Box sx={{ flex: { sm: "1 1 0" }, minWidth: 0, textAlign: { sm: "right" } }}>
             <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
-              PAC
+              Sondes
             </Typography>
             <Stack
               direction="row"
@@ -246,19 +246,9 @@ function TemperatureSplitLegend(props) {
               rowGap={0.75}
               sx={{ justifyContent: { xs: "flex-start", sm: "flex-end" } }}
             >
-              {pac.map(renderEntry)}
+              {[...sensors, ...switchbot].map(renderEntry)}
             </Stack>
           </Box>
-          {!!switchbot.length && (
-            <Box sx={{ flex: "1 1 100%", minWidth: 0 }}>
-              <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
-                SwitchBot
-              </Typography>
-              <Stack direction="row" flexWrap="wrap" useFlexGap spacing={1} columnGap={1.5} rowGap={0.75}>
-                {switchbot.map(renderEntry)}
-              </Stack>
-            </Box>
-          )}
         </Box>
       </Box>
     </Box>
@@ -281,6 +271,16 @@ function apiUrl(path) {
   const p = path.startsWith("/") ? path : `/${path}`;
   if (!API_BASE) return p;
   return `${API_BASE}${p}`;
+}
+
+function extendSeriesToDomain(rows, start, end) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const inside = rows.filter((r) => Number.isFinite(r?.ts) && r.ts >= start && r.ts <= end).sort((a, b) => a.ts - b.ts);
+  if (!inside.length) return [];
+  const out = [...inside];
+  if (inside[0].ts > start) out.unshift({ ...inside[0], ts: start });
+  if (inside[inside.length - 1].ts < end) out.push({ ...inside[inside.length - 1], ts: end });
+  return out;
 }
 
 async function api(path, options = {}) {
@@ -566,8 +566,16 @@ export default function App() {
 
   const wifiData = useMemo(() => wifiHistory.map((p) => ({ ts: p.ts, connectivite: p.connectivite ?? 100, rssi: p.rssi ?? null })), [wifiHistory]);
 
-  const chartTempData = useMemo(() => tempData.filter((r) => Number.isFinite(r.ts) && r.ts <= chartNow), [tempData, chartNow]);
-  const chartWifiData = useMemo(() => wifiData.filter((r) => Number.isFinite(r.ts) && r.ts <= chartNow), [wifiData, chartNow]);
+  const chartTempData = useMemo(() => {
+    const [start, end] = periodDomain;
+    const rows = tempData.filter((r) => Number.isFinite(r.ts) && r.ts <= chartNow);
+    return extendSeriesToDomain(rows, start, end);
+  }, [tempData, chartNow, periodDomain]);
+  const chartWifiData = useMemo(() => {
+    const [start, end] = periodDomain;
+    const rows = wifiData.filter((r) => Number.isFinite(r.ts) && r.ts <= chartNow);
+    return extendSeriesToDomain(rows, start, end);
+  }, [wifiData, chartNow, periodDomain]);
   const switchbotSeries = useMemo(() => {
     const namesById = new Map((switchbotLive?.sensors || []).map((s) => [String(s.deviceId), s.deviceName || s.deviceId]));
     for (const p of history) {
@@ -660,14 +668,17 @@ export default function App() {
     return [Math.floor(Math.min(...vals) - 5), Math.ceil(Math.max(...vals) + 5)];
   }, [chartWifiData]);
 
-  const axis = { tick: { fill: "rgba(255,255,255,0.72)", fontSize: 12 }, tickLine: false, axisLine: { stroke: "rgba(255,255,255,0.25)" } };
-  const tooltip = { contentStyle: { background: "rgba(8,14,28,.95)", border: "1px solid rgba(255,255,255,.16)", borderRadius: 10, color: "#fff" }, labelStyle: { color: "#cbd5e1" } };
+  const axis = { tick: { fill: "rgba(255,255,255,0.72)", fontSize: 11 }, tickLine: false, axisLine: { stroke: "rgba(255,255,255,0.22)" } };
+  const tooltip = {
+    contentStyle: { background: "rgba(8,14,28,.95)", border: "1px solid rgba(255,255,255,.16)", borderRadius: 10, color: "#fff" },
+    labelStyle: { color: "#cbd5e1" },
+    cursor: { stroke: "rgba(148,163,184,0.35)", strokeWidth: 1 },
+  };
   const lineWidth = 1.5;
 
   const xScaleConfig = useMemo(() => {
     const [start, end] = periodDomain;
     const hourMs = 60 * 60 * 1000;
-    const dayMs = 24 * hourMs;
 
     const buildTicks = (stepMs) => {
       if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
@@ -678,19 +689,34 @@ export default function App() {
     };
 
     if (period === "24h") {
+      const ticks = buildTicks(hourMs);
+      const first = ticks[0];
+      const last = ticks[ticks.length - 1];
       return {
-        ticks: buildTicks(hourMs),
-        tickFormatter: (v) => `${String(new Date(v).getHours()).padStart(2, "0")}h`,
+        ticks,
+        tickFormatter: (v) => {
+          if (v === first || v === last) return `${String(new Date(v).getHours()).padStart(2, "0")}h`;
+          return new Date(v).getHours() % 2 === 0 ? `${String(new Date(v).getHours()).padStart(2, "0")}h` : "";
+        },
         tickCount: undefined,
       };
     }
-    if (period === "3d" || period === "7d" || period === "30d" || period === "90d") {
-      const dailyTicks = buildTicks(dayMs);
+    if (period === "3d" || period === "7d") {
+      const steps = period === "3d" ? 3 : 7;
+      const ticks = Array.from({ length: steps + 1 }, (_, i) => start + (i * (end - start)) / steps);
       return {
-        ticks: period === "3d" || period === "7d" ? dailyTicks : undefined,
+        ticks,
         tickFormatter: (v) =>
           new Date(v).toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "2-digit" }),
-        tickCount: period === "3d" || period === "7d" ? undefined : period === "90d" ? 12 : 10,
+        tickCount: undefined,
+      };
+    }
+    if (period === "30d" || period === "90d") {
+      return {
+        ticks: undefined,
+        tickFormatter: (v) =>
+          new Date(v).toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "2-digit" }),
+        tickCount: period === "90d" ? 12 : 10,
       };
     }
     return {
@@ -700,6 +726,13 @@ export default function App() {
       tickCount: 10,
     };
   }, [period, periodDomain]);
+
+  const xAxisMinTickGap = useMemo(() => {
+    if (period === "24h") return 12;
+    if (period === "3d") return 16;
+    if (period === "7d") return 22;
+    return 28;
+  }, [period]);
 
   useEffect(() => {
     if (!switchbotSeries.length) return;
@@ -1025,7 +1058,7 @@ export default function App() {
                           ifOverflow="extendDomain"
                         />
                       ))}
-                      <CartesianGrid strokeDasharray="3 3" />
+                      <CartesianGrid strokeDasharray="2 4" stroke="rgba(148,163,184,0.28)" />
                       <XAxis
                         dataKey="ts"
                         type="number"
@@ -1035,7 +1068,8 @@ export default function App() {
                         tickFormatter={xScaleConfig.tickFormatter}
                         tickCount={xScaleConfig.tickCount}
                         interval={0}
-                        minTickGap={18}
+                        minTickGap={xAxisMinTickGap}
+                        tickMargin={8}
                       />
                       <YAxis yAxisId="temp" domain={tempYDomain} {...axis} />
                       <YAxis
@@ -1044,7 +1078,7 @@ export default function App() {
                         hide
                         domain={[0, (max) => Math.ceil((Number(max) || 0) + 1)]}
                       />
-                      <Tooltip content={renderCleanTooltip(false)} />
+                      <Tooltip content={renderCleanTooltip(false)} {...tooltip} />
                       <Legend
                         content={(legendProps) => (
                           <TemperatureSplitLegend
@@ -1088,6 +1122,7 @@ export default function App() {
                         stroke="#60a5fa"
                         strokeWidth={lineWidth}
                         dot={false}
+                        activeDot={{ r: 2.5 }}
                         connectNulls
                         {...TRACK_LINE_ANIM}
                         hide={!chartSeriesVisible.sechilienne}
@@ -1100,6 +1135,7 @@ export default function App() {
                         stroke="#c084fc"
                         strokeWidth={lineWidth}
                         dot={false}
+                        activeDot={{ r: 2.5 }}
                         connectNulls
                         {...TRACK_LINE_ANIM}
                         hide={!chartSeriesVisible.chamrousse}
@@ -1112,6 +1148,7 @@ export default function App() {
                         stroke="#2ed4bf"
                         strokeWidth={lineWidth}
                         dot={false}
+                        activeDot={{ r: 2.5 }}
                         connectNulls
                         {...TRACK_LINE_ANIM}
                         hide={!chartSeriesVisible.interieure}
@@ -1124,6 +1161,7 @@ export default function App() {
                         stroke="#f59e0b"
                         strokeWidth={lineWidth}
                         dot={false}
+                        activeDot={{ r: 2.5 }}
                         connectNulls
                         {...TRACK_LINE_ANIM}
                         hide={!chartSeriesVisible.consigne}
@@ -1136,6 +1174,7 @@ export default function App() {
                         stroke="#38bdf8"
                         strokeWidth={lineWidth}
                         dot={false}
+                        activeDot={{ r: 2.5 }}
                         connectNulls
                         {...TRACK_LINE_ANIM}
                         hide={!chartSeriesVisible.pacExterieure}
@@ -1150,6 +1189,7 @@ export default function App() {
                           stroke={s.color}
                           strokeWidth={lineWidth}
                           dot={false}
+                          activeDot={{ r: 2.5 }}
                           connectNulls
                           {...TRACK_LINE_ANIM}
                           hide={!chartSeriesVisible[s.key]}
@@ -1158,7 +1198,7 @@ export default function App() {
                     </ComposedChart>
                   ) : (
                     <LineChart data={chartWifiData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>
-                      <CartesianGrid strokeDasharray="3 3" />
+                      <CartesianGrid strokeDasharray="2 4" stroke="rgba(148,163,184,0.28)" />
                       <XAxis
                         dataKey="ts"
                         type="number"
@@ -1168,13 +1208,14 @@ export default function App() {
                         tickFormatter={xScaleConfig.tickFormatter}
                         tickCount={xScaleConfig.tickCount}
                         interval={0}
-                        minTickGap={18}
+                        minTickGap={xAxisMinTickGap}
+                        tickMargin={8}
                       />
                       <YAxis domain={wifiYDomain} {...axis} />
-                      <Tooltip content={renderCleanTooltip(true)} />
+                      <Tooltip content={renderCleanTooltip(true)} {...tooltip} />
                       <Legend />
-                      <Line name="Connectivite (%)" type="monotone" dataKey="connectivite" stroke="#22c55e" strokeWidth={lineWidth} dot={false} connectNulls {...TRACK_LINE_ANIM} />
-                      <Line name="Signal RSSI (dBm)" type="monotone" dataKey="rssi" stroke="#ef4444" strokeWidth={lineWidth} dot={false} connectNulls {...TRACK_LINE_ANIM} />
+                      <Line name="Connectivite (%)" type="monotone" dataKey="connectivite" stroke="#22c55e" strokeWidth={lineWidth} dot={false} activeDot={{ r: 2.5 }} connectNulls {...TRACK_LINE_ANIM} />
+                      <Line name="Signal RSSI (dBm)" type="monotone" dataKey="rssi" stroke="#ef4444" strokeWidth={lineWidth} dot={false} activeDot={{ r: 2.5 }} connectNulls {...TRACK_LINE_ANIM} />
                     </LineChart>
                   )}
                 </ResponsiveContainer>
