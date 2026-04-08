@@ -662,28 +662,44 @@ export default function App() {
 
   const axis = { tick: { fill: "rgba(255,255,255,0.72)", fontSize: 12 }, tickLine: false, axisLine: { stroke: "rgba(255,255,255,0.25)" } };
   const tooltip = { contentStyle: { background: "rgba(8,14,28,.95)", border: "1px solid rgba(255,255,255,.16)", borderRadius: 10, color: "#fff" }, labelStyle: { color: "#cbd5e1" } };
-  const lineWidth = 2;
+  const lineWidth = 1.5;
 
   const xScaleConfig = useMemo(() => {
+    const [start, end] = periodDomain;
+    const hourMs = 60 * 60 * 1000;
+    const dayMs = 24 * hourMs;
+
+    const buildTicks = (stepMs) => {
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+      const ticks = [];
+      for (let t = start; t <= end; t += stepMs) ticks.push(t);
+      if (!ticks.length || ticks[ticks.length - 1] < end) ticks.push(end);
+      return ticks;
+    };
+
     if (period === "24h") {
       return {
+        ticks: buildTicks(hourMs),
         tickFormatter: (v) => `${String(new Date(v).getHours()).padStart(2, "0")}h`,
-        ticks: 9,
+        tickCount: undefined,
       };
     }
     if (period === "3d" || period === "7d" || period === "30d" || period === "90d") {
+      const dailyTicks = buildTicks(dayMs);
       return {
+        ticks: period === "3d" || period === "7d" ? dailyTicks : undefined,
         tickFormatter: (v) =>
           new Date(v).toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "2-digit" }),
-        ticks: period === "90d" ? 12 : period === "30d" ? 10 : 8,
+        tickCount: period === "3d" || period === "7d" ? undefined : period === "90d" ? 12 : 10,
       };
     }
     return {
+      ticks: undefined,
       tickFormatter: (v) =>
         new Date(v).toLocaleDateString("fr-FR", { month: "short", year: "2-digit" }),
-      ticks: 10,
+      tickCount: 10,
     };
-  }, [period]);
+  }, [period, periodDomain]);
 
   useEffect(() => {
     if (!switchbotSeries.length) return;
@@ -1010,7 +1026,17 @@ export default function App() {
                         />
                       ))}
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="ts" type="number" domain={periodDomain} {...axis} tickFormatter={xScaleConfig.tickFormatter} tickCount={xScaleConfig.ticks} interval="preserveStartEnd" />
+                      <XAxis
+                        dataKey="ts"
+                        type="number"
+                        domain={periodDomain}
+                        {...axis}
+                        ticks={xScaleConfig.ticks}
+                        tickFormatter={xScaleConfig.tickFormatter}
+                        tickCount={xScaleConfig.tickCount}
+                        interval={0}
+                        minTickGap={18}
+                      />
                       <YAxis yAxisId="temp" domain={tempYDomain} {...axis} />
                       <YAxis
                         yAxisId="precip"
@@ -1123,7 +1149,7 @@ export default function App() {
                           dataKey={s.key}
                           stroke={s.color}
                           strokeWidth={lineWidth}
-                          dot={{ r: 2 }}
+                          dot={false}
                           connectNulls
                           {...TRACK_LINE_ANIM}
                           hide={!chartSeriesVisible[s.key]}
@@ -1133,7 +1159,17 @@ export default function App() {
                   ) : (
                     <LineChart data={chartWifiData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="ts" type="number" domain={periodDomain} {...axis} tickFormatter={xScaleConfig.tickFormatter} tickCount={xScaleConfig.ticks} interval="preserveStartEnd" />
+                      <XAxis
+                        dataKey="ts"
+                        type="number"
+                        domain={periodDomain}
+                        {...axis}
+                        ticks={xScaleConfig.ticks}
+                        tickFormatter={xScaleConfig.tickFormatter}
+                        tickCount={xScaleConfig.tickCount}
+                        interval={0}
+                        minTickGap={18}
+                      />
                       <YAxis domain={wifiYDomain} {...axis} />
                       <Tooltip content={renderCleanTooltip(true)} />
                       <Legend />
