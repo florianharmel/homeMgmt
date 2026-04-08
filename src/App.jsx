@@ -542,22 +542,40 @@ export default function App() {
       return r;
     });
 
-    if (switchbotSalonId) {
-      // Quand la série principale vient de SwitchBot, le lissage glissant provoque un "saut"
-      // visuel à chaque refresh (la fenêtre se déplace). On conserve donc la valeur brute.
-      return cleaned;
-    }
-    const windowSize = period === "24h" ? 2 : period === "3d" ? 3 : 4;
-    return cleaned.map((r, i) => {
-      const vals = [];
-      for (let j = Math.max(0, i - windowSize); j <= Math.min(cleaned.length - 1, i + windowSize); j += 1) {
-        const v = cleaned[j].interieure;
-        if (Number.isFinite(v)) vals.push(v);
+    const windowSize = period === "24h" ? 4 : period === "3d" ? 6 : period === "7d" ? 8 : 10;
+    const smoothRowsByKey = (rows, key) =>
+      rows.map((r, i) => {
+        const vals = [];
+        for (let j = Math.max(0, i - windowSize); j <= Math.min(rows.length - 1, i + windowSize); j += 1) {
+          const v = rows[j]?.[key];
+          if (Number.isFinite(v)) vals.push(v);
+        }
+        if (!vals.length) return r;
+        const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+        return { ...r, [key]: Math.round(avg * 10) / 10 };
+      });
+
+    // Lisse toutes les séries issues de SwitchBot pour un tracé plus propre.
+    const switchbotKeys = new Set();
+    for (const r of cleaned) {
+      for (const k of Object.keys(r)) {
+        if (k.startsWith("switchbot_")) switchbotKeys.add(k);
       }
-      if (!vals.length) return r;
-      const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-      return { ...r, interieure: Math.round(avg * 10) / 10 };
-    });
+    }
+    if (switchbotSalonId) switchbotKeys.add("interieure");
+    if (switchbotExterieurId) switchbotKeys.add("pacExterieure");
+
+    let out = cleaned;
+    for (const key of switchbotKeys) {
+      out = smoothRowsByKey(out, key);
+      out = smoothRowsByKey(out, key);
+    }
+
+    // Si l'intérieur ne vient pas de SwitchBot, conserve le lissage historique existant.
+    if (!switchbotSalonId) {
+      out = smoothRowsByKey(out, "interieure");
+    }
+    return out;
   }, [history, pacTrend, weatherHistory, period, switchbotLive, switchbotSalonId, switchbotExterieurId]);
 
   const wifiData = useMemo(() => wifiHistory.map((p) => ({ ts: p.ts, connectivite: p.connectivite ?? 100, rssi: p.rssi ?? null })), [wifiHistory]);
@@ -1139,7 +1157,7 @@ export default function App() {
                       <Line
                         yAxisId="temp"
                         name="Température intérieure"
-                        type="monotone"
+                        type="natural"
                         dataKey="interieure"
                         stroke="#2ed4bf"
                         strokeWidth={lineWidth}
@@ -1165,7 +1183,7 @@ export default function App() {
                       <Line
                         yAxisId="temp"
                         name="Extérieure"
-                        type="monotone"
+                        type="natural"
                         dataKey="pacExterieure"
                         stroke="#38bdf8"
                         strokeWidth={lineWidth}
@@ -1180,7 +1198,7 @@ export default function App() {
                           key={s.key}
                           yAxisId="temp"
                           name={s.name}
-                          type="monotone"
+                          type="natural"
                           dataKey={s.key}
                           stroke={s.color}
                           strokeWidth={lineWidth}
