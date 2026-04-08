@@ -510,24 +510,8 @@ export default function App() {
       }
       map.set(p.ts, row);
     }
-    const liveTs = Number(switchbotLive?.updatedAt);
-    const liveTemps = switchbotLive?.temps && typeof switchbotLive.temps === "object" ? switchbotLive.temps : null;
-    if (Number.isFinite(liveTs) && liveTs > 0 && liveTemps) {
-      const row = map.get(liveTs) || { ts: liveTs };
-      for (const [deviceId, rawTemp] of Object.entries(liveTemps)) {
-        const n = Number(rawTemp);
-        row[switchbotSeriesKey(deviceId)] = Number.isFinite(n) ? n : null;
-      }
-      if (switchbotSalonId) {
-        const n = Number(liveTemps[switchbotSalonId]);
-        if (Number.isFinite(n)) row.interieure = n;
-      }
-      if (switchbotExterieurId) {
-        const n = Number(liveTemps[switchbotExterieurId]);
-        row.pacExterieure = Number.isFinite(n) ? n : row.pacExterieure ?? null;
-      }
-      map.set(liveTs, row);
-    }
+    // Ne pas injecter de point "live" dans le suivi :
+    // on stabilise le graphe en affichant uniquement les points historisés côté serveur.
     for (const p of pacTrend) {
       const cur = map.get(p.ts) || { ts: p.ts };
       map.set(p.ts, {
@@ -558,6 +542,11 @@ export default function App() {
       return r;
     });
 
+    if (switchbotSalonId) {
+      // Quand la série principale vient de SwitchBot, le lissage glissant provoque un "saut"
+      // visuel à chaque refresh (la fenêtre se déplace). On conserve donc la valeur brute.
+      return cleaned;
+    }
     const windowSize = period === "24h" ? 2 : period === "3d" ? 3 : 4;
     return cleaned.map((r, i) => {
       const vals = [];
