@@ -105,7 +105,8 @@ function ModeIcon({ mode, sx }) {
 
 const LEGEND_WEATHER = new Set(["Pluie (La Charmette)", "Neige (La Charmette)", "Extérieure La Charmette", "Extérieure Chamrousse"]);
 const WEATHER_LEGEND_ORDER = ["Pluie (La Charmette)", "Neige (La Charmette)", "Extérieure La Charmette", "Extérieure Chamrousse"];
-const PAC_LEGEND_ORDER = ["Température réelle PAC", "Consigne PAC", "Extérieure (PAC)"];
+const PAC_LEGEND_ORDER = ["Température intérieure", "Consigne PAC", "Extérieure"];
+const SWITCHBOT_COLOR_POOL = ["#f472b6", "#34d399", "#f87171", "#a78bfa", "#fb7185", "#22d3ee", "#facc15", "#4ade80"];
 
 /** Libellés Recharts `name` → clé `chartSeriesVisible`. */
 const LEGEND_VALUE_TO_KEY = {
@@ -113,10 +114,22 @@ const LEGEND_VALUE_TO_KEY = {
   "Neige (La Charmette)": "neige",
   "Extérieure La Charmette": "sechilienne",
   "Extérieure Chamrousse": "chamrousse",
-  "Température réelle PAC": "interieure",
+  "Température intérieure": "interieure",
   "Consigne PAC": "consigne",
-  "Extérieure (PAC)": "pacExterieure",
+  "Extérieure": "pacExterieure",
 };
+
+function normalizeSwitchbotLabel(input) {
+  return String(input || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function switchbotSeriesKey(deviceId) {
+  return `switchbot_${String(deviceId || "").replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
 
 function sortLegendByOrder(entries, order) {
   const rank = (name) => {
@@ -127,20 +140,25 @@ function sortLegendByOrder(entries, order) {
 }
 
 function TemperatureSplitLegend(props) {
-  const { payload, chartSeriesVisible, onToggleSeries } = props;
+  const { payload, chartSeriesVisible, onToggleSeries, legendValueToKey, switchbotSeriesKeys } = props;
   if (!payload?.length) return null;
+  const isSwitchbotEntry = (entry) => {
+    const key = entry?.dataKey;
+    return Boolean(key && switchbotSeriesKeys?.has?.(String(key)));
+  };
   const weather = sortLegendByOrder(
     payload.filter((e) => LEGEND_WEATHER.has(e.value)),
     WEATHER_LEGEND_ORDER,
   );
   const pac = sortLegendByOrder(
-    payload.filter((e) => !LEGEND_WEATHER.has(e.value)),
+    payload.filter((e) => !LEGEND_WEATHER.has(e.value) && !isSwitchbotEntry(e)),
     PAC_LEGEND_ORDER,
   );
+  const switchbot = payload.filter((e) => isSwitchbotEntry(e));
   const renderEntry = (entry) => {
     const c = entry.color;
     const isBar = entry.type === "rect" || entry.type === "square";
-    const seriesKey = LEGEND_VALUE_TO_KEY[entry.value];
+    const seriesKey = legendValueToKey?.[entry.value] || LEGEND_VALUE_TO_KEY[entry.value];
     const visible = seriesKey ? !!chartSeriesVisible?.[seriesKey] : true;
     const interactive = Boolean(seriesKey && onToggleSeries);
     return (
@@ -231,6 +249,16 @@ function TemperatureSplitLegend(props) {
               {pac.map(renderEntry)}
             </Stack>
           </Box>
+          {!!switchbot.length && (
+            <Box sx={{ flex: "1 1 100%", minWidth: 0 }}>
+              <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.45)", fontWeight: 700, display: "block", mb: 0.5 }}>
+                SwitchBot
+              </Typography>
+              <Stack direction="row" flexWrap="wrap" useFlexGap spacing={1} columnGap={1.5} rowGap={0.75}>
+                {switchbot.map(renderEntry)}
+              </Stack>
+            </Box>
+          )}
         </Box>
       </Box>
     </Box>
@@ -256,10 +284,28 @@ function apiUrl(path) {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(apiUrl(path), { headers: { "Content-Type": "application/json" }, ...options });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Erreur API");
-  return data;
+  const timeoutMs = options?.timeoutMs ?? 8000;
+  const { timeoutMs: _timeoutMs, ...fetchOptions } = options || {};
+
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(apiUrl(path), {
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      ...fetchOptions,
+    });
+
+    const contentType = res.headers.get("content-type") || "";
+    const data = contentType.includes("application/json") ? await res.json() : { error: await res.text() };
+    if (!res.ok) throw new Error(data?.error || "Erreur API");
+    return data;
+  } catch (e) {
+    if (e?.name === "AbortError") throw new Error("Timeout API");
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 export default function App() {
@@ -271,6 +317,7 @@ export default function App() {
   const [weatherHistory, setWeatherHistory] = useState([]);
   const [wifiHistory, setWifiHistory] = useState([]);
   const [forecast, setForecast] = useState(null);
+  const [switchbotLive, setSwitchbotLive] = useState({ sensors: [], temps: {}, updatedAt: 0 });
   const [period, setPeriod] = useState("3d");
   const [meteoTab, setMeteoTab] = useState("");
   const [trackingTab, setTrackingTab] = useState("temperature");
@@ -283,6 +330,22 @@ export default function App() {
   const pauseGlobalRefreshUntilRef = useRef(0);
   const refreshInFlightRef = useRef(false);
   const pendingRefreshRef = useRef(false);
+
+  const switchbotSalonId = useMemo(() => {
+    const sensors = Array.isArray(switchbotLive?.sensors) ? switchbotLive.sensors : [];
+    for (const s of sensors) {
+      if (normalizeSwitchbotLabel(s?.deviceName) === "etagere salon") return String(s?.deviceId || "");
+    }
+    return "";
+  }, [switchbotLive]);
+
+  const switchbotExterieurId = useMemo(() => {
+    const sensors = Array.isArray(switchbotLive?.sensors) ? switchbotLive.sensors : [];
+    for (const s of sensors) {
+      if (normalizeSwitchbotLabel(s?.deviceName) === "exterieur") return String(s?.deviceId || "");
+    }
+    return "";
+  }, [switchbotLive]);
 
   /** Courbes / barres affichées sur le graphique température (défaut : pas consigne, pas ext. PAC, pas Chamrousse). */
   const [chartSeriesVisible, setChartSeriesVisible] = useState({
@@ -315,12 +378,13 @@ export default function App() {
       }
 
       // Device + historiques en parallèle : le serveur ne bloque plus /api/device sur tout le lot Open-Meteo.
-      const [dRes, h, p, w, wh] = await Promise.allSettled([
+      const [dRes, h, p, w, wh, sb] = await Promise.allSettled([
         api("/api/device"),
         api(`/api/history?period=${period}`),
         api(`/api/pac/trend?period=${period}`),
         api(`/api/pac/wifi-history?period=${period}`),
         api(`/api/weather/history?period=${period}`),
+        api("/api/switchbot/live", { timeoutMs: 4000 }),
       ]);
       if (dRes.status === "fulfilled") {
         setDevice(dRes.value ? normalizeDeviceFromApi(dRes.value) : null);
@@ -336,6 +400,7 @@ export default function App() {
       if (p.status === "fulfilled") setPacTrend(p.value.points || []);
       if (w.status === "fulfilled") setWifiHistory(w.value.points || []);
       if (wh.status === "fulfilled") setWeatherHistory(wh.value.points || []);
+      if (sb.status === "fulfilled") setSwitchbotLive(sb.value || { sensors: [], temps: {}, updatedAt: 0 });
     } catch (e) {
       setError(e.message);
     } finally {
@@ -420,23 +485,47 @@ export default function App() {
   const tempData = useMemo(() => {
     const map = new Map();
     for (const p of history) {
-      const ot = Number(p.outdoorTemp);
-      map.set(p.ts, {
+      const sbTemps = p?.switchbotTemps && typeof p.switchbotTemps === "object" ? p.switchbotTemps : null;
+      const salonTemp = switchbotSalonId && sbTemps ? Number(sbTemps[switchbotSalonId]) : NaN;
+      const exterieurTemp = switchbotExterieurId && sbTemps ? Number(sbTemps[switchbotExterieurId]) : NaN;
+      const row = {
         ts: p.ts,
-        interieure: Number(p.indoorTemp),
+        interieure: Number.isFinite(salonTemp) ? salonTemp : Number(p.indoorTemp),
         consigne: Number(p.targetTemp),
         pacOn: !!p.power,
-        pacExterieure: Number.isFinite(ot) ? ot : null,
-      });
+        pacExterieure: Number.isFinite(exterieurTemp) ? exterieurTemp : null,
+      };
+      if (sbTemps) {
+        for (const [deviceId, rawTemp] of Object.entries(sbTemps)) {
+          const n = Number(rawTemp);
+          row[switchbotSeriesKey(deviceId)] = Number.isFinite(n) ? n : null;
+        }
+      }
+      map.set(p.ts, row);
+    }
+    const liveTs = Number(switchbotLive?.updatedAt);
+    const liveTemps = switchbotLive?.temps && typeof switchbotLive.temps === "object" ? switchbotLive.temps : null;
+    if (Number.isFinite(liveTs) && liveTs > 0 && liveTemps) {
+      const row = map.get(liveTs) || { ts: liveTs };
+      for (const [deviceId, rawTemp] of Object.entries(liveTemps)) {
+        const n = Number(rawTemp);
+        row[switchbotSeriesKey(deviceId)] = Number.isFinite(n) ? n : null;
+      }
+      if (switchbotSalonId) {
+        const n = Number(liveTemps[switchbotSalonId]);
+        if (Number.isFinite(n)) row.interieure = n;
+      }
+      if (switchbotExterieurId) {
+        const n = Number(liveTemps[switchbotExterieurId]);
+        row.pacExterieure = Number.isFinite(n) ? n : row.pacExterieure ?? null;
+      }
+      map.set(liveTs, row);
     }
     for (const p of pacTrend) {
       const cur = map.get(p.ts) || { ts: p.ts };
-      const otTrend = Number(p.outdoorTemp);
       map.set(p.ts, {
         ...cur,
-        interieure: Number.isFinite(Number(p.indoorTemp)) ? Number(p.indoorTemp) : cur.interieure,
         consigne: Number.isFinite(Number(p.targetTemp)) ? Number(p.targetTemp) : cur.consigne,
-        pacExterieure: Number.isFinite(otTrend) ? otTrend : cur.pacExterieure ?? null,
       });
     }
     for (const p of weatherHistory) {
@@ -473,12 +562,37 @@ export default function App() {
       const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
       return { ...r, interieure: Math.round(avg * 10) / 10 };
     });
-  }, [history, pacTrend, weatherHistory, period]);
+  }, [history, pacTrend, weatherHistory, period, switchbotLive, switchbotSalonId, switchbotExterieurId]);
 
   const wifiData = useMemo(() => wifiHistory.map((p) => ({ ts: p.ts, connectivite: p.connectivite ?? 100, rssi: p.rssi ?? null })), [wifiHistory]);
 
   const chartTempData = useMemo(() => tempData.filter((r) => Number.isFinite(r.ts) && r.ts <= chartNow), [tempData, chartNow]);
   const chartWifiData = useMemo(() => wifiData.filter((r) => Number.isFinite(r.ts) && r.ts <= chartNow), [wifiData, chartNow]);
+  const switchbotSeries = useMemo(() => {
+    const namesById = new Map((switchbotLive?.sensors || []).map((s) => [String(s.deviceId), s.deviceName || s.deviceId]));
+    for (const p of history) {
+      const devices = Array.isArray(p?.switchbotDevices) ? p.switchbotDevices : [];
+      for (const d of devices) {
+        const id = String(d?.deviceId || "");
+        if (!id) continue;
+        if (!namesById.has(id)) namesById.set(id, d?.deviceName || id);
+      }
+    }
+    if (switchbotSalonId) namesById.delete(String(switchbotSalonId));
+    if (switchbotExterieurId) namesById.delete(String(switchbotExterieurId));
+    return Array.from(namesById.entries()).map(([deviceId, deviceName], idx) => ({
+      deviceId,
+      key: switchbotSeriesKey(deviceId),
+      name: `${deviceName}`,
+      color: SWITCHBOT_COLOR_POOL[idx % SWITCHBOT_COLOR_POOL.length],
+    }));
+  }, [switchbotLive, history, switchbotSalonId, switchbotExterieurId]);
+  const switchbotSeriesKeys = useMemo(() => new Set(switchbotSeries.map((s) => s.key)), [switchbotSeries]);
+  const legendValueToKey = useMemo(() => {
+    const map = { ...LEGEND_VALUE_TO_KEY };
+    for (const s of switchbotSeries) map[s.name] = s.key;
+    return map;
+  }, [switchbotSeries]);
 
   const pacOnRanges = useMemo(() => {
     const [start, end] = periodDomain;
@@ -532,10 +646,14 @@ export default function App() {
       if (chartSeriesVisible.pacExterieure && Number.isFinite(p.pacExterieure)) vals.push(p.pacExterieure);
       if (chartSeriesVisible.sechilienne && Number.isFinite(p.sechilienne)) vals.push(p.sechilienne);
       if (chartSeriesVisible.chamrousse && Number.isFinite(p.chamrousse)) vals.push(p.chamrousse);
+      for (const s of switchbotSeries) {
+        if (!chartSeriesVisible[s.key]) continue;
+        if (Number.isFinite(p[s.key])) vals.push(p[s.key]);
+      }
     }
     if (!vals.length) return [0, 30];
     return [Math.floor(Math.min(...vals) - 1), Math.ceil(Math.max(...vals) + 1)];
-  }, [chartTempData, chartSeriesVisible]);
+  }, [chartTempData, chartSeriesVisible, switchbotSeries]);
   const wifiYDomain = useMemo(() => {
     const vals = chartWifiData.flatMap((p) => [p.connectivite, p.rssi]).filter((v) => Number.isFinite(v));
     if (!vals.length) return [-100, 100];
@@ -566,6 +684,20 @@ export default function App() {
       ticks: 10,
     };
   }, [period]);
+
+  useEffect(() => {
+    if (!switchbotSeries.length) return;
+    setChartSeriesVisible((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const s of switchbotSeries) {
+        if (Object.prototype.hasOwnProperty.call(next, s.key)) continue;
+        next[s.key] = true;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [switchbotSeries]);
 
   const renderCleanTooltip = (isWifi = false) => ({ active, payload, label }) => {
     if (!active || !payload?.length) return null;
@@ -628,6 +760,21 @@ export default function App() {
   );
 
   const isAuthenticated = !!session?.authenticated;
+  const pilotageIndoorTemp = useMemo(() => {
+    const liveTemps = switchbotLive?.temps && typeof switchbotLive.temps === "object" ? switchbotLive.temps : null;
+    if (switchbotSalonId && liveTemps) {
+      const n = Number(liveTemps[switchbotSalonId]);
+      if (Number.isFinite(n)) return n;
+    }
+    return Number(device?.indoorTemp);
+  }, [switchbotLive, switchbotSalonId, device?.indoorTemp]);
+
+  const pilotageOutdoorTemp = useMemo(() => {
+    const liveTemps = switchbotLive?.temps && typeof switchbotLive.temps === "object" ? switchbotLive.temps : null;
+    if (!switchbotExterieurId || !liveTemps) return NaN;
+    return Number(liveTemps[switchbotExterieurId]);
+  }, [switchbotLive, switchbotExterieurId]);
+
   if (!isAuthenticated) {
     return (
       <Container maxWidth="sm" sx={{ py: 8 }}>
@@ -665,7 +812,7 @@ export default function App() {
                   <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2}>
                     <Stack direction="row" alignItems="baseline" spacing={1}>
                       <Typography variant="h2" sx={{ fontWeight: 800, lineHeight: 1 }}>
-                        {Number.isFinite(Number(device?.indoorTemp)) ? Number(device.indoorTemp).toFixed(1) : "--"}
+                        {Number.isFinite(Number(pilotageIndoorTemp)) ? Number(pilotageIndoorTemp).toFixed(1) : "--"}
                       </Typography>
                       <Typography variant="h4" sx={{ opacity: 0.9 }}>
                         °C
@@ -683,14 +830,14 @@ export default function App() {
                       )}
                     </Box>
                   </Stack>
-                  {Number.isFinite(Number(device?.outdoorTemp)) && (
+                  {Number.isFinite(Number(pilotageOutdoorTemp)) && (
                     <Box sx={{ mt: 1.5 }}>
                       <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.72)", display: "block" }}>
-                        Extérieure (sonde PAC)
+                        Extérieure
                       </Typography>
                       <Stack direction="row" alignItems="baseline" spacing={1}>
                         <Typography variant="h5" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
-                          {Number(device.outdoorTemp).toFixed(1)}
+                          {Number(pilotageOutdoorTemp).toFixed(1)}
                         </Typography>
                         <Typography variant="body1" sx={{ opacity: 0.85 }}>
                           °C
@@ -877,6 +1024,8 @@ export default function App() {
                           <TemperatureSplitLegend
                             {...legendProps}
                             chartSeriesVisible={chartSeriesVisible}
+                            legendValueToKey={legendValueToKey}
+                            switchbotSeriesKeys={switchbotSeriesKeys}
                             onToggleSeries={(key) =>
                               setChartSeriesVisible((v) => ({ ...v, [key]: !v[key] }))
                             }
@@ -931,7 +1080,7 @@ export default function App() {
                       />
                       <Line
                         yAxisId="temp"
-                        name="Température réelle PAC"
+                        name="Température intérieure"
                         type="monotone"
                         dataKey="interieure"
                         stroke="#2ed4bf"
@@ -955,7 +1104,7 @@ export default function App() {
                       />
                       <Line
                         yAxisId="temp"
-                        name="Extérieure (PAC)"
+                        name="Extérieure"
                         type="monotone"
                         dataKey="pacExterieure"
                         stroke="#38bdf8"
@@ -965,6 +1114,21 @@ export default function App() {
                         {...TRACK_LINE_ANIM}
                         hide={!chartSeriesVisible.pacExterieure}
                       />
+                      {switchbotSeries.map((s) => (
+                        <Line
+                          key={s.key}
+                          yAxisId="temp"
+                          name={s.name}
+                          type="monotone"
+                          dataKey={s.key}
+                          stroke={s.color}
+                          strokeWidth={lineWidth}
+                          dot={{ r: 2 }}
+                          connectNulls
+                          {...TRACK_LINE_ANIM}
+                          hide={!chartSeriesVisible[s.key]}
+                        />
+                      ))}
                     </ComposedChart>
                   ) : (
                     <LineChart data={chartWifiData} margin={{ top: 10, right: 12, left: 0, bottom: 6 }}>

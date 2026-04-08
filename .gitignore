@@ -7,3 +7,4 @@ dist/
 *.log
 server/auth-store.json
 server/history-store.json
+server/switchbot-store.json

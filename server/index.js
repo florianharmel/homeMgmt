@@ -1,3 +1,4 @@
+import "dotenv/config";
 import crypto from "node:crypto";
 import https from "node:https";
 import fs from "node:fs";
@@ -47,6 +48,15 @@ const state = {
     forecastByHorizon: {},
     historyByPeriod: {},
   },
+  switchbot: {
+    token: "",
+    secret: "",
+  },
+  switchbotCache: {
+    updatedAt: 0,
+    devices: [],
+    temps: {},
+  },
   rawDevice: null,
   sampleIntervalMs: 30 * 1000,
 };
@@ -64,6 +74,9 @@ const MAX_BACKUP_POINTS = 20000;
 const WEATHER_OPEN_METEO_TTL_MS = 60 * 60 * 1000;
 const WEATHER_HISTORY_PERIODS = ["24h", "3d", "7d", "30d", "90d"];
 let weatherServerCacheRefresh = null;
+const SWITCHBOT_CACHE_TTL_MS = 5 * 60 * 1000;
+const SWITCHBOT_MAX_PARALLEL_STATUS = 4;
+let switchbotCacheRefresh = null;
 
 function normalizePeriod(raw) {
   const p = String(raw || "3d").toLowerCase();
@@ -145,6 +158,20 @@ function saveAuthState() {
   } catch (_e) {
     // Ignore persistence errors.
   }
+}
+
+/** Credentials SwitchBot uniquement via variables d’environnement (SWITCHBOT_TOKEN / SWITCHBOT_SECRET). */
+function loadSwitchbotCredentialsFromEnv() {
+  const t = String(process.env.SWITCHBOT_TOKEN || "").trim();
+  const s = String(process.env.SWITCHBOT_SECRET || "").trim();
+  if (!t || !s) {
+    state.switchbot.token = "";
+    state.switchbot.secret = "";
+    return false;
+  }
+  state.switchbot.token = t;
+  state.switchbot.secret = s;
+  return true;
 }
 
 /** Jeton MELCloud invalide ou expiré : on vide la session pour forcer une nouvelle connexion. */
@@ -332,6 +359,159 @@ async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS, attempt = 0) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function hasSwitchbotCredentials() {
+  return Boolean(String(state.switchbot.token || "").trim() && String(state.switchbot.secret || "").trim());
+}
+
+function signSwitchbotHeaders(token, secret) {
+  const t = `${Date.now()}`;
+  const nonce = crypto.randomUUID();
+  const data = `${token}${t}${nonce}`;
+  const sign = crypto.createHmac("sha256", secret).update(data).digest("base64");
+  return { t, nonce, sign };
+}
+
+const SWITCHBOT_FETCH_TIMEOUT_MS = 8_000;
+
+async function switchbotApi(pathname) {
+  if (!hasSwitchbotCredentials()) throw new Error("SwitchBot non configuré");
+  const token = String(state.switchbot.token || "").trim();
+  const secret = String(state.switchbot.secret || "").trim();
+  const signed = signSwitchbotHeaders(token, secret);
+  const url = `https://api.switch-bot.com/v1.1${pathname}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SWITCHBOT_FETCH_TIMEOUT_MS);
+  let r;
+  try {
+    r = await fetch(url, {
+      method: "GET",
+      signal: ctrl.signal,
+      headers: {
+        Authorization: token,
+        sign: signed.sign,
+        t: signed.t,
+        nonce: signed.nonce,
+        "Content-Type": "application/json",
+      },
+    });
+  } catch (e) {
+    if (e?.name === "AbortError") throw new Error(`Timeout SwitchBot après ${SWITCHBOT_FETCH_TIMEOUT_MS}ms`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const body = await r.json().catch(() => null);
+  if (!r.ok) {
+    throw new Error(`SwitchBot HTTP ${r.status}`);
+  }
+  if (Number(body?.statusCode) !== 100) {
+    throw new Error(`SwitchBot API ${body?.statusCode ?? "?"}: ${body?.message || "échec"}`);
+  }
+  return body.body;
+}
+
+function normalizeSwitchbotTemp(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeSwitchbotDeviceName(name, deviceType, deviceId) {
+  const raw = String(name || "").trim();
+  const base = raw || String(deviceId || "").trim() || "SwitchBot";
+  const lower = base.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const type = String(deviceType || "").toLowerCase();
+  if (lower.includes("fenetre")) return "Exterieur";
+  if (lower.includes("hub") || type.includes("hub")) return "Etagere salon";
+  return base;
+}
+
+function normalizeSwitchbotSensor(sensor, status) {
+  const temperature =
+    normalizeSwitchbotTemp(status?.temperature) ??
+    normalizeSwitchbotTemp(status?.body?.temperature) ??
+    normalizeSwitchbotTemp(sensor?.temperature);
+  if (!Number.isFinite(temperature)) return null;
+  const deviceId = String(sensor?.deviceId || sensor?.device_id || "").trim();
+  if (!deviceId) return null;
+  return {
+    deviceId,
+    deviceName: normalizeSwitchbotDeviceName(sensor?.deviceName || sensor?.device_name, sensor?.deviceType, deviceId),
+    temperature,
+    humidity: normalizeSwitchbotTemp(status?.humidity),
+    battery: normalizeSwitchbotTemp(status?.battery),
+  };
+}
+
+async function fetchSwitchbotTempsFromApi() {
+  const body = await switchbotApi("/devices");
+  const allDevices = Array.isArray(body?.deviceList) ? body.deviceList : [];
+  const sensors = allDevices.filter((d) => {
+    const type = String(d?.deviceType || "").toLowerCase();
+    // SwitchBot retourne différents types selon le modèle (ex: "Meter", "MeterPlus", "WoIOSensor", etc.)
+    // On garde uniquement les devices dont le status expose température/humidité.
+    return type.includes("meter") || type.includes("woiosensor") || type.endsWith("sensor") || type.includes("hub 2") || type.includes("hub2");
+  });
+  if (!sensors.length) return { devices: [], temps: {} };
+
+  const outDevices = [];
+  const temps = {};
+  for (let i = 0; i < sensors.length; i += SWITCHBOT_MAX_PARALLEL_STATUS) {
+    const batch = sensors.slice(i, i + SWITCHBOT_MAX_PARALLEL_STATUS);
+    const statuses = await Promise.all(
+      batch.map(async (s) => {
+        try {
+          const status = await switchbotApi(`/devices/${encodeURIComponent(s.deviceId)}/status`);
+          return { sensor: s, status };
+        } catch (_e) {
+          return { sensor: s, status: null };
+        }
+      }),
+    );
+    for (const item of statuses) {
+      const normalized = normalizeSwitchbotSensor(item.sensor, item.status);
+      if (!normalized) continue;
+      outDevices.push({
+        deviceId: normalized.deviceId,
+        deviceName: normalized.deviceName,
+      });
+      temps[normalized.deviceId] = normalized.temperature;
+    }
+  }
+  return { devices: outDevices, temps };
+}
+
+function kickSwitchbotCacheIfStale() {
+  const now = Date.now();
+  if (!hasSwitchbotCredentials()) return;
+  if (state.switchbotCache.updatedAt && now - state.switchbotCache.updatedAt < SWITCHBOT_CACHE_TTL_MS) return;
+  if (switchbotCacheRefresh) return;
+  ensureSwitchbotCache().catch(() => {});
+}
+
+async function ensureSwitchbotCache() {
+  if (!hasSwitchbotCredentials()) return;
+  const now = Date.now();
+  if (state.switchbotCache.updatedAt && now - state.switchbotCache.updatedAt < SWITCHBOT_CACHE_TTL_MS) return;
+  if (switchbotCacheRefresh) {
+    await switchbotCacheRefresh;
+    return;
+  }
+  switchbotCacheRefresh = (async () => {
+    try {
+      const data = await fetchSwitchbotTempsFromApi();
+      state.switchbotCache = {
+        updatedAt: Date.now(),
+        devices: data.devices,
+        temps: data.temps,
+      };
+    } finally {
+      switchbotCacheRefresh = null;
+    }
+  })();
+  await switchbotCacheRefresh;
 }
 
 async function getTokenFromRefreshToken() {
@@ -819,11 +999,14 @@ async function refreshDeviceImpl() {
 
   // Ne pas attendre Open-Meteo : le cache est rempli en arrière-plan (ensureWeatherServerCache).
   kickWeatherCacheIfStale();
+  kickSwitchbotCacheIfStale();
   const weather =
     state.weatherServerCache.current ?? {
       sechilienneTemp: null,
       chamrousseTemp: null,
     };
+  const switchbotTemps = { ...(state.switchbotCache.temps || {}) };
+  const switchbotDevices = Array.isArray(state.switchbotCache.devices) ? state.switchbotCache.devices : [];
   const now = Date.now();
   const lastPoint = state.history[state.history.length - 1];
   // Sample history on a fixed interval so long-term curves are available.
@@ -836,6 +1019,8 @@ async function refreshDeviceImpl() {
       power: state.device.power,
       sechilienneTemp: weather.sechilienneTemp,
       chamrousseTemp: weather.chamrousseTemp,
+      switchbotTemps,
+      switchbotDevices,
       isConnected: state.device.isConnected,
       rssi: state.device.rssi,
       source: "device-live",
@@ -1321,6 +1506,24 @@ app.get("/api/session", async (req, res) => {
   res.json({ authenticated: !!state.refreshToken, email: state.email || null });
 });
 
+app.get("/api/switchbot/live", async (_req, res) => {
+  try {
+    if (!state.refreshToken) throw new Error("Non authentifié");
+    if (!hasSwitchbotCredentials()) {
+      return res.json({ configured: false, sensors: [], temps: {}, updatedAt: 0 });
+    }
+    await ensureSwitchbotCache();
+    return res.json({
+      configured: true,
+      sensors: state.switchbotCache.devices,
+      temps: state.switchbotCache.temps,
+      updatedAt: state.switchbotCache.updatedAt,
+    });
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+});
+
 app.get("/api/device", async (req, res) => {
   try {
     if (!state.refreshToken) return res.json(null);
@@ -1515,10 +1718,12 @@ if (savedAuth) {
   state.accessToken = savedAuth.accessToken;
   state.expiresAt = savedAuth.expiresAt;
 }
+loadSwitchbotCredentialsFromEnv();
 
 const PORT = Number(process.env.PORT) || 8787;
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`API MELCloud lancée sur le port ${PORT}`);
   kickWeatherCacheIfStale();
+  kickSwitchbotCacheIfStale();
 });

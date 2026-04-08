@@ -41,4 +41,5 @@ Les fichiers `server/auth-store.json` et `server/history-store.json` restent sur
 
 - Le backend implémente un flux OAuth MELCloud Home inspiré du plugin `homebridge-melcloud-home`.
 - Les températures extérieures sont récupérées via Open-Meteo.
+- SwitchBot (capteurs Meter) : configurer `SWITCHBOT_TOKEN` et `SWITCHBOT_SECRET` **uniquement** côté serveur API (variables d’environnement).
 - Le dashboard cible un seul device (première PAC détectée), comme demandé.
