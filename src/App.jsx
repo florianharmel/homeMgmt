@@ -324,6 +324,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
   const [error, setError] = useState("");
+  const [isRefreshingFollow, setIsRefreshingFollow] = useState(false);
+  const [lastFollowRefreshAt, setLastFollowRefreshAt] = useState(0);
   const weatherScrollRef = useRef(null);
   /** Borne droite des graphiques de suivi (doit bouger avec l’heure réelle, pas seulement au changement de période). */
   const [chartNow, setChartNow] = useState(() => Date.now());
@@ -353,7 +355,7 @@ export default function App() {
     consigne: false,
     sechilienne: true,
     chamrousse: false,
-    pacExterieure: false,
+    pacExterieure: true,
     pluie: true,
     neige: true,
   });
@@ -369,6 +371,7 @@ export default function App() {
       return;
     }
     refreshInFlightRef.current = true;
+    setIsRefreshingFollow(true);
     try {
       const s = await api("/api/session");
       setSession(s);
@@ -401,10 +404,14 @@ export default function App() {
       if (w.status === "fulfilled") setWifiHistory(w.value.points || []);
       if (wh.status === "fulfilled") setWeatherHistory(wh.value.points || []);
       if (sb.status === "fulfilled") setSwitchbotLive(sb.value || { sensors: [], temps: {}, updatedAt: 0 });
+      if ([h, p, w, wh, sb].some((x) => x.status === "fulfilled")) {
+        setLastFollowRefreshAt(Date.now());
+      }
     } catch (e) {
       setError(e.message);
     } finally {
       refreshInFlightRef.current = false;
+      setIsRefreshingFollow(false);
       setChartNow(Date.now());
       if (pendingRefreshRef.current) {
         pendingRefreshRef.current = false;
@@ -1220,6 +1227,13 @@ export default function App() {
                   )}
                 </ResponsiveContainer>
               </Box>
+              <Typography variant="caption" sx={{ display: "block", mt: 0.75, color: "rgba(255,255,255,0.62)" }}>
+                {isRefreshingFollow
+                  ? "Rafraichissement des donnees en cours..."
+                  : lastFollowRefreshAt
+                    ? `Dernier rafraichissement : ${new Date(lastFollowRefreshAt).toLocaleDateString("fr-FR")} ${new Date(lastFollowRefreshAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
+                    : "En attente du premier rafraichissement..."}
+              </Typography>
             </CardContent></Card>
           </Grid>
         </Grid>
